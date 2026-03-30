@@ -491,6 +491,15 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
         return get_performance_by_category()
 
     elif name == "place_order":
+        # Hard limit: max 3 trades per cycle (enforced in code, not just prompt)
+        trades_this_cycle = config.get("_trades_this_cycle", 0)
+        max_trades = config.get("_max_trades_per_cycle", 3)
+        if trades_this_cycle >= max_trades:
+            return {
+                "error": f"Trade limit reached: {trades_this_cycle}/{max_trades} trades this cycle. Wait for next cycle.",
+                "executed": False,
+            }
+
         result = place_order(
             market_id=args["market_id"],
             market_title=args.get("market_title", ""),
@@ -507,8 +516,9 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
             venue=venue,
             simmer_api_key=simmer_key,
         )
-        # Notify via Telegram only on real execution (not dry run)
+        # Count executed trades and notify
         if result.get("executed"):
+            config["_trades_this_cycle"] = trades_this_cycle + 1
             currency = "$SIM" if config.get("venue", "sim") == "sim" else "USDC"
             msg = f"{args['side']} {args['amount_usdc']}{currency} | {args.get('market_title', '')}"
             send_telegram(msg, config)
@@ -675,6 +685,8 @@ class PolybotAgent:
         self.has_near_resolution = False
         self.previous_positions: list[dict] = []
         self.previous_market_ids: set[str] = set()
+        self._trades_this_cycle: int = 0
+        self._max_trades_per_cycle: int = 3
         # Balance cache (avoid double RPC calls per cycle)
         self._cached_balance: float = -1
         self._balance_cache_ts: float = 0
@@ -823,6 +835,9 @@ class PolybotAgent:
         """Run one full trading cycle."""
         self.cycle_count += 1
         self.has_near_resolution = False
+        self._trades_this_cycle = 0
+        self.config["_trades_this_cycle"] = 0
+        self.config["_max_trades_per_cycle"] = self._max_trades_per_cycle
         logger.info(f"=== CYCLE {self.cycle_count} START ===")
 
         # Detect resolved trades by comparing with previous cycle positions

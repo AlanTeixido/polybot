@@ -148,32 +148,68 @@ def get_markets(
                     except (ValueError, TypeError):
                         pass
 
-                # Smart scoring: prioritize markets where research gives edge
+                # Classify market by researchability
                 title_lower = (m.get("question", m.get("title", "")) or "").lower()
+                cat_lower = (m.get("category", "") or "").lower()
 
-                # Base: probability distance from 50% (decisive = better)
-                prob_score = abs(yes_prob - 50) / 50
+                # --- TIER 1: High edge (verifiable with data/news) ---
+                tier1_kw = [
+                    "president", "election", "vote", "poll", "nominee", "primary",
+                    "congress", "senate", "governor", "mayor", "parliament",
+                    "gdp", "fed", "interest rate", "inflation", "unemployment",
+                    "oscar", "grammy", "emmy", "award", "nobel",
+                    "launch", "release", "ipo", "merger", "acquisition",
+                    "war", "ceasefire", "peace", "treaty", "sanctions",
+                    "indictment", "trial", "verdict", "ruling",
+                ]
+                tier1_cat = ["politics", "economics", "science", "entertainment"]
 
-                # Bonus for researchable categories (news/data can inform)
-                research_bonus = 0.0
-                researchable = ["president", "election", "vote", "poll", "win", "champion",
-                                "qualify", "final", "gdp", "rate", "fed", "congress",
-                                "senate", "governor", "mayor", "war", "peace", "treaty",
-                                "oscar", "grammy", "award", "launch", "release", "ipo"]
-                if any(kw in title_lower for kw in researchable):
-                    research_bonus = 0.5
+                # --- TIER 2: Medium edge (sports with clear standings) ---
+                tier2_kw = [
+                    "champion", "qualify", "playoffs", "final", "world cup",
+                    "super bowl", "world series", "stanley cup",
+                    "premier league", "la liga", "serie a", "bundesliga",
+                    "nba", "nfl", "mlb", "nhl",
+                    "relegation", "promotion", "seed",
+                ]
 
-                # Bonus for near-resolution (more predictable near the end)
-                time_bonus = max(0, (7 - days_to_res) / 7) * 0.3 if days_to_res <= 7 else 0
+                # --- TIER 3: Low edge (individual match outcomes, spreads) ---
+                # These are the "vs", "winner", "spread", "o/u" markets
+                tier3_kw = [
+                    " vs ", " vs. ", "winner", "spread", "o/u", "over/under",
+                    "map 2", "map 3", "set 1", "set 2", "first half",
+                    "points o/u",
+                ]
 
-                # Penalty for noise markets (hard to research, basically coin flips)
-                noise_penalty = 0.0
-                noise_terms = ["temperature", "highest temp", "lowest temp", "°c", "°f",
-                               "exact price", "close above", "close below"]
-                if any(nt in title_lower for nt in noise_terms):
-                    noise_penalty = 0.4
+                # --- NOISE: No edge (temperature, exact price, random) ---
+                noise_kw = [
+                    "temperature", "highest temp", "lowest temp", "°c", "°f",
+                    "exact price", "close above", "close below",
+                    "will reach", "will hit",
+                ]
 
-                quick_score = prob_score + research_bonus + time_bonus - noise_penalty
+                # Determine tier and score
+                if any(kw in title_lower for kw in noise_kw):
+                    tier = "noise"
+                    quick_score = -1.0  # Will be filtered out
+                elif any(kw in title_lower for kw in tier1_kw) or any(c in cat_lower for c in tier1_cat):
+                    tier = "tier1"
+                    quick_score = 2.0 + abs(yes_prob - 50) / 50
+                elif any(kw in title_lower for kw in tier2_kw):
+                    tier = "tier2"
+                    quick_score = 1.0 + abs(yes_prob - 50) / 50
+                elif any(kw in title_lower for kw in tier3_kw):
+                    tier = "tier3"
+                    quick_score = 0.3 + abs(yes_prob - 50) / 50
+                else:
+                    tier = "other"
+                    quick_score = 0.5 + abs(yes_prob - 50) / 50
+
+                # Near-resolution bonus (applies to all tiers)
+                if days_to_res <= 3:
+                    quick_score += 0.5
+                elif days_to_res <= 7:
+                    quick_score += 0.3
 
                 result.append({
                     "id": m.get("id", m.get("market_id", "")),
@@ -186,12 +222,14 @@ def get_markets(
                     "category": m.get("category", "unknown"),
                     "condition_id": m.get("conditionId", m.get("condition_id", "")),
                     "quick_score": round(quick_score, 3),
+                    "tier": tier,
                     "venue": "sim",
                 })
 
-            # Sort by distance from 50% (most decisive markets first)
+            # Filter out noise, sort by score
+            result = [m for m in result if m["quick_score"] > 0]
             result.sort(key=lambda x: x["quick_score"], reverse=True)
-            result = result[:20]
+            result = result[:15]
             _markets_cache = {"data": result, "timestamp": time.time()}
             return result
         except Exception as e:
