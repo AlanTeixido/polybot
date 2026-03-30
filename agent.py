@@ -321,6 +321,10 @@ Antes de place_order, razona explícitamente:
   Tamaño: [X USDC] ([Y]% del balance)
   Decisión: OPERAR porque [razón concreta]
 
+WHALE TRACKING:
+- Whale wallets tracked are top Polymarket traders by profit.
+- Follow their trades when 2+ agree on same market/side.
+
 APRENDIZAJE CONTINUO:
 - Trade ganado: save_knowledge con categoría, probabilidad inicial, tipo de señal que lo identificó
 - Trade perdido: save_knowledge con qué falló y qué evitar
@@ -379,10 +383,11 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
         )
 
     elif name == "get_market_detail":
-        return get_market_detail(args["market_id"])
+        return get_market_detail(args["market_id"], venue=venue, simmer_api_key=simmer_key)
 
     elif name == "analyze_market":
-        return analyze_market(args["market_id"], args.get("market_title", ""))
+        return analyze_market(args["market_id"], args.get("market_title", ""),
+                              venue=venue, simmer_api_key=simmer_key)
 
     elif name == "get_whale_activity":
         return get_whale_activity(

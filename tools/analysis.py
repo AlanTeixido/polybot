@@ -15,10 +15,72 @@ REQUEST_TIMEOUT = 15
 
 # Polymarket Gamma API
 GAMMA_API = "https://gamma-api.polymarket.com"
+SIMMER_API = "https://api.simmer.markets/api/sdk"
 
 
-def analyze_market(market_id: str, market_title: str = "") -> dict[str, Any]:
+def analyze_market(
+    market_id: str,
+    market_title: str = "",
+    venue: str = "sim",
+    simmer_api_key: str = "",
+) -> dict[str, Any]:
     """Score a market for opportunity and risk."""
+    # --- Simmer venue: use context endpoint ---
+    if venue == "sim" and simmer_api_key:
+        try:
+            resp = SESSION.get(
+                f"{SIMMER_API}/context/{market_id}",
+                headers={"Authorization": f"Bearer {simmer_api_key}"},
+                timeout=REQUEST_TIMEOUT,
+            )
+            resp.raise_for_status()
+            ctx = resp.json()
+
+            # Map Simmer context to our analysis format
+            yes_price = float(ctx.get("probability", ctx.get("yes_price", 0.5)) or 0.5)
+            if yes_price > 1:
+                yes_price = yes_price / 100
+            no_price = 1 - yes_price
+            max_price = max(yes_price, no_price)
+
+            return {
+                "market_id": market_id,
+                "title": ctx.get("question", ctx.get("title", market_title)),
+                "category": ctx.get("category", "unknown"),
+                "yes_price": round(yes_price, 4),
+                "no_price": round(no_price, 4),
+                "volume": float(ctx.get("volume", 0) or 0),
+                "liquidity": float(ctx.get("liquidity", 0) or 0),
+                "days_to_resolution": float(ctx.get("days_to_resolution", 30)),
+                "opportunity_score": float(ctx.get("opportunity_score", 5)),
+                "risk_score": float(ctx.get("risk_score", 5)),
+                "recommendation": ctx.get("recommendation", "CONSIDER"),
+                "favored_side": "YES" if yes_price > no_price else "NO",
+                "favored_probability": round(max_price * 100, 1),
+                "edge": ctx.get("edge"),
+                "slippage": ctx.get("slippage"),
+                "warnings": ctx.get("warnings", []),
+            }
+        except Exception as e:
+            logger.warning(f"Simmer context failed for {market_id}: {e}")
+            # Fallback: return CONSIDER with basic info
+            return {
+                "market_id": market_id,
+                "title": market_title,
+                "category": "unknown",
+                "yes_price": 0.5,
+                "no_price": 0.5,
+                "volume": 0,
+                "liquidity": 0,
+                "days_to_resolution": 30,
+                "opportunity_score": 5.0,
+                "risk_score": 5.0,
+                "recommendation": "CONSIDER",
+                "favored_side": "YES",
+                "favored_probability": 50.0,
+            }
+
+    # --- Polymarket venue: use Gamma API ---
     try:
         resp = SESSION.get(
             f"{GAMMA_API}/markets/{market_id}", timeout=REQUEST_TIMEOUT
@@ -43,7 +105,6 @@ def analyze_market(market_id: str, market_title: str = "") -> dict[str, Any]:
     liquidity = float(market.get("liquidity", 0) or 0)
 
     # Parse outcomes/prices
-    outcomes = market.get("outcomes", [])
     outcome_prices = market.get("outcomePrices", "")
     prices = []
     if isinstance(outcome_prices, str) and outcome_prices:
@@ -60,8 +121,6 @@ def analyze_market(market_id: str, market_title: str = "") -> dict[str, Any]:
 
     # --- Opportunity Score (0-10) ---
     opp_score = 0.0
-
-    # Near-resolution bonus
     if days_to_resolution <= 3:
         opp_score += 4.0
     elif days_to_resolution <= 7:
@@ -69,14 +128,12 @@ def analyze_market(market_id: str, market_title: str = "") -> dict[str, Any]:
     elif days_to_resolution <= 14:
         opp_score += 1.5
 
-    # High probability (near-resolution strategy)
     max_price = max(yes_price, no_price)
     if max_price >= 0.92:
         opp_score += 3.0
     elif max_price >= 0.85:
         opp_score += 1.5
 
-    # Volume score
     if volume >= 50000:
         opp_score += 2.0
     elif volume >= 10000:
@@ -84,7 +141,6 @@ def analyze_market(market_id: str, market_title: str = "") -> dict[str, Any]:
     elif volume >= 1000:
         opp_score += 1.0
 
-    # Liquidity score
     if liquidity >= 10000:
         opp_score += 1.0
     elif liquidity >= 1000:
@@ -94,27 +150,20 @@ def analyze_market(market_id: str, market_title: str = "") -> dict[str, Any]:
 
     # --- Risk Score (0-10, higher = riskier) ---
     risk_score = 0.0
-
     if days_to_resolution > 30:
         risk_score += 3.0
     elif days_to_resolution > 14:
         risk_score += 1.5
-
     if volume < 500:
         risk_score += 3.0
     elif volume < 1000:
         risk_score += 1.5
-
     if liquidity < 500:
         risk_score += 2.0
-
-    # Mid-range probability = harder to predict
     if 0.35 < max_price < 0.65:
         risk_score += 2.0
-
     risk_score = min(risk_score, 10.0)
 
-    # --- Recommendation ---
     rec = "SKIP"
     favored_side = "YES" if yes_price > no_price else "NO"
     if opp_score >= 7 and risk_score <= 4:

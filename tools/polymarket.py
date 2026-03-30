@@ -121,29 +121,54 @@ def get_markets(
         try:
             resp = SESSION.get(
                 f"{SIMMER_API}/markets",
-                params={"limit": limit, "sort": "volume"},
+                params={"limit": 50},
                 headers={"Authorization": f"Bearer {simmer_api_key}"},
                 timeout=REQUEST_TIMEOUT,
             )
             resp.raise_for_status()
             data = resp.json()
             markets = data if isinstance(data, list) else data.get("data", data.get("markets", []))
+
+            now = datetime.now(timezone.utc)
             result = []
             for m in markets:
+                # Parse probability (Simmer returns float 0-1)
+                prob_raw = m.get("probability", m.get("yes_probability", 0.5))
+                if isinstance(prob_raw, str):
+                    prob_raw = float(prob_raw)
+                yes_prob = round(prob_raw * 100 if prob_raw <= 1 else prob_raw, 1)
+
+                # Parse days to resolution
+                end_date_str = m.get("endDate", m.get("end_date", ""))
+                days_to_res = 30
+                if end_date_str:
+                    try:
+                        end_date = datetime.fromisoformat(str(end_date_str).replace("Z", "+00:00"))
+                        days_to_res = max((end_date - now).total_seconds() / 86400, 0)
+                    except (ValueError, TypeError):
+                        pass
+
+                # Quick score: how far from 50% (more interesting markets)
+                quick_score = abs(yes_prob - 50) / 50
+
                 result.append({
                     "id": m.get("id", m.get("market_id", "")),
                     "title": m.get("question", m.get("title", "")),
-                    "yes_probability": round(float(m.get("yes_probability", m.get("outcomePrices", [0.5])[0] if isinstance(m.get("outcomePrices"), list) else 50)), 1),
+                    "yes_probability": yes_prob,
                     "volume": float(m.get("volume", 0) or 0),
                     "liquidity": float(m.get("liquidity", 0) or 0),
-                    "end_date": m.get("endDate", m.get("end_date", "")),
-                    "days_to_resolution": float(m.get("days_to_resolution", 999)),
+                    "end_date": end_date_str,
+                    "days_to_resolution": round(days_to_res, 1),
                     "category": m.get("category", "unknown"),
                     "condition_id": m.get("conditionId", m.get("condition_id", "")),
-                    "quick_score": float(m.get("quick_score", 0)),
+                    "quick_score": round(quick_score, 3),
                 })
-            _markets_cache = {"data": result[:15], "timestamp": time.time()}
-            return result[:15]
+
+            # Sort by distance from 50% (most decisive markets first)
+            result.sort(key=lambda x: x["quick_score"], reverse=True)
+            result = result[:20]
+            _markets_cache = {"data": result, "timestamp": time.time()}
+            return result
         except Exception as e:
             logger.error(f"Simmer get_markets failed: {e}")
             return [{"error": str(e)}]
@@ -251,8 +276,48 @@ def get_markets(
         return [{"error": str(e)}]
 
 
-def get_market_detail(market_id: str) -> dict[str, Any]:
-    """Get detailed market info including orderbook data."""
+def get_market_detail(
+    market_id: str,
+    venue: str = "sim",
+    simmer_api_key: str = "",
+) -> dict[str, Any]:
+    """Get detailed market info."""
+    # --- Simmer venue ---
+    if venue == "sim" and simmer_api_key:
+        try:
+            resp = SESSION.get(
+                f"{SIMMER_API}/markets/{market_id}",
+                headers={"Authorization": f"Bearer {simmer_api_key}"},
+                timeout=REQUEST_TIMEOUT,
+            )
+            resp.raise_for_status()
+            m = resp.json()
+
+            prob = float(m.get("probability", m.get("yes_probability", 0.5)) or 0.5)
+            if prob > 1:
+                prob = prob / 100
+            yes_price = prob
+            no_price = 1 - prob
+
+            return {
+                "market_id": market_id,
+                "title": m.get("question", m.get("title", "")),
+                "description": (m.get("description", "") or "")[:300],
+                "category": m.get("category", "unknown"),
+                "yes_price": round(yes_price, 4),
+                "no_price": round(no_price, 4),
+                "volume": float(m.get("volume", 0) or 0),
+                "liquidity": float(m.get("liquidity", 0) or 0),
+                "end_date": m.get("endDate", m.get("end_date", "")),
+                "outcomes": m.get("outcomes", ["Yes", "No"]),
+                "condition_id": m.get("conditionId", m.get("condition_id", "")),
+                "clob_token_ids": "",
+            }
+        except Exception as e:
+            logger.error(f"Simmer get_market_detail failed for {market_id}: {e}")
+            return {"error": str(e), "market_id": market_id}
+
+    # --- Polymarket venue ---
     try:
         def fetch():
             resp = SESSION.get(f"{GAMMA_API}/markets/{market_id}", timeout=REQUEST_TIMEOUT)
