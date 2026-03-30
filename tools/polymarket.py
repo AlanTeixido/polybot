@@ -148,8 +148,32 @@ def get_markets(
                     except (ValueError, TypeError):
                         pass
 
-                # Quick score: how far from 50% (more interesting markets)
-                quick_score = abs(yes_prob - 50) / 50
+                # Smart scoring: prioritize markets where research gives edge
+                title_lower = (m.get("question", m.get("title", "")) or "").lower()
+
+                # Base: probability distance from 50% (decisive = better)
+                prob_score = abs(yes_prob - 50) / 50
+
+                # Bonus for researchable categories (news/data can inform)
+                research_bonus = 0.0
+                researchable = ["president", "election", "vote", "poll", "win", "champion",
+                                "qualify", "final", "gdp", "rate", "fed", "congress",
+                                "senate", "governor", "mayor", "war", "peace", "treaty",
+                                "oscar", "grammy", "award", "launch", "release", "ipo"]
+                if any(kw in title_lower for kw in researchable):
+                    research_bonus = 0.5
+
+                # Bonus for near-resolution (more predictable near the end)
+                time_bonus = max(0, (7 - days_to_res) / 7) * 0.3 if days_to_res <= 7 else 0
+
+                # Penalty for noise markets (hard to research, basically coin flips)
+                noise_penalty = 0.0
+                noise_terms = ["temperature", "highest temp", "lowest temp", "°c", "°f",
+                               "exact price", "close above", "close below"]
+                if any(nt in title_lower for nt in noise_terms):
+                    noise_penalty = 0.4
+
+                quick_score = prob_score + research_bonus + time_bonus - noise_penalty
 
                 result.append({
                     "id": m.get("id", m.get("market_id", "")),
@@ -558,6 +582,20 @@ def place_order(
     side = side.upper()
     if side not in ("YES", "NO"):
         return {"error": f"Invalid side: {side}. Must be YES or NO.", "executed": False}
+
+    # Check for conflicting position (don't bet YES and NO on same market)
+    positions = get_positions(wallet_address, venue=venue, simmer_api_key=simmer_api_key)
+    for pos in positions:
+        if isinstance(pos, dict) and pos.get("market_id") == market_id:
+            existing_side = pos.get("side", "").upper()
+            if existing_side and existing_side != side:
+                return {
+                    "error": f"Conflicting position: already have {existing_side} on this market. Cannot bet {side}.",
+                    "executed": False,
+                }
+            if existing_side == side:
+                # Same side = adding to position, allow it
+                break
 
     # --- Simmer venue ---
     if venue == "sim" and simmer_api_key:
