@@ -318,91 +318,54 @@ TOOLS = [
 # ---------------------------------------------------------------------------
 # System prompt
 # ---------------------------------------------------------------------------
-SYSTEM_PROMPT = """Eres Polybot, un agente de trading autónomo corriendo 24/7 en un servidor VPS.
-Tu único objetivo es ganar dinero de forma consistente en Polymarket.
-Operas con USDC real. Cada trade importa.
+SYSTEM_PROMPT = """You are Polybot, an autonomous trading agent running 24/7.
+Your only goal: make money consistently on prediction markets.
 
-SELECCIÓN DE MERCADOS (por orden de prioridad):
-1. RESEARCHABLE: Mercados donde puedes usar datos reales para tener edge.
-   - Política: encuestas, votaciones, aprobación — usa get_news() para verificar.
-   - Deportes: clasificaciones, eliminatorias — datos objetivos sobre quién gana.
-   - Economía: decisiones del Fed, GDP, datos macro — calendario económico.
-   - Eventos: premios, lanzamientos, IPOs — fechas conocidas.
-2. NEAR-RESOLUTION: Mercados con alta probabilidad resolviendo pronto.
-   - En SIM: 80%+ probabilidad, <7 días. En real: 92%+.
-3. WHALE-CONFIRMED: 2+ whale wallets en el mismo lado.
+SUPERFORECASTER REASONING (mandatory before every trade):
+For each market you consider, follow this exact process:
+1. DECOMPOSE: Break the question into sub-questions. "Will X win?" → What polls say? What's the trend? Any recent events?
+2. BASE RATE: What's the historical base rate? Elections: incumbent advantage? Sports: home team win rate? Use get_news() to find data.
+3. EVIDENCE: List 2-3 concrete facts that shift probability up or down from base rate. No opinions — only verifiable data.
+4. ESTIMATE: Give your probability. It MUST differ from market price by >5 points to trade, AND you must cite why.
+5. If you cannot find concrete evidence → DO NOT TRADE. "I think" is not evidence.
 
-EVITAR ESTOS MERCADOS (son coin flips, no hay edge):
-- Temperatura exacta ("Will temp be 16°C?") — imposible de predecir con precision.
-- Crypto exact-price ("BTC > $95,000 friday") — ruido puro.
-- Cualquier mercado donde no puedas encontrar datos que te den ventaja.
+MARKET TIERS (pre-filtered by code, you only see tradeable markets):
+- tier1: Politics, economy, events — highest edge, always research with get_news()
+- tier2: Major sports leagues/tournaments — check standings, qualifications
+- tier3: Individual matches — lower edge, only trade with strong data
+- Markets >95% one side are filtered out (spread too tight)
 
-REGLA DE ORO: Si no puedes explicar POR QUÉ tu estimación es mejor que la del mercado
-con datos concretos (encuesta, resultado deportivo, noticia), NO operes ese mercado.
+POSITION SIZING (adaptive, based on edge):
+- edge 5-10pts: small bet (0.3x max_bet)
+- edge 10-20pts: medium bet (0.6x max_bet)
+- edge 20pts+: large bet (1.0x max_bet)
+- tier1 markets: multiply by 1.5x (capped at max_bet)
+- tier3 markets: multiply by 0.5x
+- Whale confirmation (2+ wallets): multiply by 1.3x
+- NEVER exceed max_bet_usdc or 20% of balance
 
-NUNCA apuestes YES y NO en el mismo mercado. Eso cancela tu posición y pierdes el spread.
-
-PROCESO DE DECISIÓN (seguir este orden exacto cada ciclo):
-1. get_balance() — si balance < 10 USDC, no operar, enviar alerta
-2. get_positions() — revisar posiciones abiertas, no superar 10 simultáneas
-3. memory_search('winning trades recent') — recordar qué ha funcionado
-4. get_markets(min_volume=500) — escanear todos los mercados disponibles
-5. get_whale_activity(hours_back=24) — identificar movimientos inteligentes
-6. Para los top 5 candidatos: get_news(query) + analyze_market(id)
-7. Calcular edge para cada candidato: mi_estimacion - probabilidad_mercado
-8. Ejecutar MÁXIMO 3 trades por ciclo con estas prioridades:
-   - Near-resolution + whale confirmation = ejecutar siempre
-   - Edge > 5 puntos porcentuales + volumen alto = ejecutar
-   - Diversificar: no 3 trades de la misma categoría
-9. save_knowledge() — guardar el aprendizaje más importante del ciclo
-
-CÁLCULO DE TAMAÑO DE APUESTA:
-- Base: min(max_bet_usdc, balance * 0.20)
-- Multiplicador por confianza:
-  * Near-resolution 92%+: 1.5x
-  * Whale confirmation: 1.3x
-  * Solo análisis propio: 1.0x
-- Nunca superar max_bet_usdc del config
-- Nunca más del 20% del balance total en un trade
-
-GESTIÓN DE RIESGO ESTRICTA:
-- Si el balance cae 30% en 7 días: reducir max_bet_usdc a la mitad automáticamente
-- Si 5 pérdidas consecutivas: parar y enviar alerta por Telegram
-- Si balance < 5 USDC: parar completamente, notificar
-
-RAZONAMIENTO ANTES DE CADA TRADE:
-Antes de place_order, razona explícitamente:
-  Mercado: [título]
-  Probabilidad mercado: X%
-  Mi estimación: Y%
-  Edge: +Z puntos
-  Whale activity: [sí/no, cuántos coinciden]
-  Noticias relevantes: [resumen breve]
-  Riesgo: [bajo/medio/alto]
-  Tamaño: [X USDC] ([Y]% del balance)
-  Decisión: OPERAR porque [razón concreta]
+HARD RULES:
+- Max 3 trades per cycle (enforced in code)
+- NEVER bet YES and NO on the same market
+- NEVER trade without citing specific evidence
+- If prescan data is in the initial message, DO NOT re-fetch it with tools
+- Markets you already have a position in: skip unless adding to same side
 
 WHALE TRACKING:
-- Whale wallets tracked are top Polymarket traders by profit.
-- Follow their trades when 2+ agree on same market/side.
+Whale wallets are top Polymarket traders by profit (millions in verified gains).
+When 2+ whales agree on same market/side, it's a strong confirmation signal.
 
-APRENDIZAJE CONTINUO:
-- Trade ganado: save_knowledge con categoría, probabilidad inicial, tipo de señal que lo identificó
-- Trade perdido: save_knowledge con qué falló y qué evitar
-- Cada 50 trades: analizar win rate por categoría via get_performance_by_category()
-- Las lecciones recientes pesan más (decaimiento temporal BM25, half-life 30 días)
+BEFORE EACH place_order, output this exact format (2 lines max):
+TRADE: [YES/NO] [amount] on "[title]" | Edge: [X]pts | Evidence: [one sentence]
 
-VENUE SIM (cuando operas en Simmer):
-- Volume y liquidity se muestran como "sim" — son virtuales, NO los uses para filtrar.
-- En SIM, todos los mercados son operables. No descartes por volumen o liquidez.
-- Opera más agresivamente en SIM: es dinero virtual, el objetivo es generar datos.
-- Umbral de probabilidad mínimo: 80% (no 92%) para near-resolution en SIM.
+LEARNING:
+- After each cycle: save_knowledge() with what worked or failed
+- Check get_performance_by_category() every 50 trades
 
-EFICIENCIA DE TOKENS (CRÍTICO — cada token cuesta dinero real):
-- MÁXIMO 3 tool calls por ciclo. No llames get_balance + get_positions + memory_search si ya tienes esos datos en el mensaje inicial.
-- El prescan ya te da: balance, mercados, whale signals. USA esos datos, no los re-fetches.
-- Si no hay oportunidades claras, responde "Sin oportunidades" y termina. No analices cada mercado.
-- Razona en 2-3 frases, no párrafos. Cada palabra cuesta."""
+TOKEN EFFICIENCY:
+- Max 3 tool calls per cycle. Prescan already gives you balance, markets, whales.
+- No opportunities? Say "Skip" and end. Don't analyze every market.
+- Be concise. Every token costs real money."""
 
 
 # ---------------------------------------------------------------------------
@@ -516,11 +479,24 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
             venue=venue,
             simmer_api_key=simmer_key,
         )
-        # Count executed trades and notify
+        # Count executed trades and notify with running totals
         if result.get("executed"):
             config["_trades_this_cycle"] = trades_this_cycle + 1
             currency = "$SIM" if config.get("venue", "sim") == "sim" else "USDC"
-            msg = f"{args['side']} {args['amount_usdc']}{currency} | {args.get('market_title', '')}"
+
+            # Get current stats for context
+            from tools.memory import get_stats as _get_stats
+            st = _get_stats()
+            bal = config.get("_cached_balance", "?")
+            wr = st.get("win_rate", 0)
+            total_pnl = st.get("total_pnl", 0)
+            pnl_sign = "+" if total_pnl >= 0 else ""
+            total_trades = st.get("total_trades", 0) + 1
+
+            msg = (
+                f"{args['side']} {args['amount_usdc']}{currency} | {args.get('market_title', '')}\n"
+                f"Trade #{total_trades} | WR: {wr}% | PnL: {pnl_sign}{total_pnl}{currency} | Bal: {bal}{currency}"
+            )
             send_telegram(msg, config)
         return result
 
@@ -720,6 +696,7 @@ class PolybotAgent:
 
         # 1. Check balance — if too low, don't bother scanning
         balance = self.get_cached_balance()
+        self.config["_cached_balance"] = balance
         if balance >= 0 and balance < 10:
             logger.info(f"Prescan: balance too low ({balance} USDC), skipping LLM")
             return {"invoke_llm": False, "reasons": ["balance_too_low"], "balance": balance}
@@ -790,9 +767,14 @@ class PolybotAgent:
             return
 
         from tools.polymarket import get_positions
-        from tools.memory import save_trade_result, save_knowledge
+        from tools.memory import save_trade_result, save_knowledge, get_stats
 
-        current = get_positions(self.config["wallet_address"])
+        venue = self.config.get("venue", "sim")
+        current = get_positions(
+            self.config["wallet_address"],
+            venue=venue,
+            simmer_api_key=self.config.get("simmer_api_key", ""),
+        )
         current_ids = {
             p["market_id"] for p in current
             if isinstance(p, dict) and "error" not in p
@@ -805,12 +787,13 @@ class PolybotAgent:
                 won = pnl > 0
                 title = prev_pos.get("title", "unknown")
                 side = prev_pos.get("side", "unknown")
+                amount = round(prev_pos.get("size", 0) * prev_pos.get("avg_price", 0), 2)
 
                 save_trade_result(
                     market_id=prev_pos.get("market_id", ""),
                     title=title,
                     side=side,
-                    amount_usdc=prev_pos.get("size", 0) * prev_pos.get("avg_price", 0),
+                    amount_usdc=amount,
                     pnl=round(pnl, 4),
                     reason="auto-detected resolution",
                     category="unknown",
@@ -819,15 +802,21 @@ class PolybotAgent:
 
                 outcome = "WIN" if won else "LOSS"
                 save_knowledge(
-                    insight=f"{outcome}: '{title}' ({side}) resolved with PnL {pnl:.4f} USDC. "
-                            f"Avg price: {prev_pos.get('avg_price', 0)}, "
-                            f"Final price: {prev_pos.get('current_price', 0)}",
-                    tags=[outcome.lower(), "resolved", "auto-detected"],
+                    insight=f"{outcome}: '{title}' ({side}) PnL {pnl:.2f}. "
+                            f"Entry: {prev_pos.get('avg_price', 0)}, Exit: {prev_pos.get('current_price', 0)}",
+                    tags=[outcome.lower(), "resolved"],
                 )
 
-                currency = "$SIM" if self.config.get("venue", "sim") == "sim" else "USDC"
+                # Detailed notification with running stats
+                currency = "$SIM" if venue == "sim" else "USDC"
                 pnl_sign = "+" if pnl >= 0 else ""
-                msg = f"*{outcome}* {pnl_sign}{pnl:.2f} {currency}\n{title}\nSide: {side}"
+                st = get_stats()
+                msg = (
+                    f"{'W' if won else 'L'} {pnl_sign}{pnl:.2f}{currency} | {title}\n"
+                    f"{side} {amount}{currency} @ {prev_pos.get('avg_price', 0)}\n"
+                    f"Record: {st.get('wins', 0)}W/{st.get('losses', 0)}L | "
+                    f"Total: {'+' if st.get('total_pnl', 0) >= 0 else ''}{st.get('total_pnl', 0)}{currency}"
+                )
                 logger.info(msg.replace("*", ""))
                 send_telegram(msg, self.config)
 

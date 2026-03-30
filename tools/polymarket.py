@@ -226,8 +226,12 @@ def get_markets(
                     "venue": "sim",
                 })
 
-            # Filter out noise, sort by score
-            result = [m for m in result if m["quick_score"] > 0]
+            # Filter out noise. Keep >95% only if resolving within 3 days (near-resolution strategy)
+            result = [
+                m for m in result
+                if m["quick_score"] > 0
+                and not (max(m["yes_probability"], 100 - m["yes_probability"]) > 95 and m["days_to_resolution"] > 3)
+            ]
             result.sort(key=lambda x: x["quick_score"], reverse=True)
             result = result[:15]
             _markets_cache = {"data": result, "timestamp": time.time()}
@@ -289,6 +293,10 @@ def get_markets(
                     pass
             elif isinstance(outcome_prices, list) and outcome_prices:
                 yes_prob = float(outcome_prices[0]) * 100
+
+            # Skip near-resolved markets unless resolving within 3 days
+            if max(yes_prob, 100 - yes_prob) > 95 and days_to_res > 3:
+                continue
 
             if not (min_probability <= yes_prob <= max_probability):
                 continue
