@@ -14,6 +14,7 @@ logger = logging.getLogger("polybot.polymarket")
 # API endpoints
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
+SIMMER_API = "https://api.simmer.markets/api/sdk"
 
 # Polygon USDC.e contract
 USDC_ADDRESS = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
@@ -104,8 +105,10 @@ def get_markets(
     limit: int = 50,
     keyword: str = "",
     category: str = "",
+    venue: str = "sim",
+    simmer_api_key: str = "",
 ) -> list[dict[str, Any]]:
-    """Fetch and filter available markets from Polymarket."""
+    """Fetch and filter available markets."""
     global _markets_cache
 
     # Return cached data if fresh
@@ -113,6 +116,39 @@ def get_markets(
         logger.debug("Returning cached markets")
         return _markets_cache["data"]
 
+    # --- Simmer venue ---
+    if venue == "sim" and simmer_api_key:
+        try:
+            resp = SESSION.get(
+                f"{SIMMER_API}/markets",
+                params={"limit": limit, "sort": "volume"},
+                headers={"Authorization": f"Bearer {simmer_api_key}"},
+                timeout=REQUEST_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            markets = data if isinstance(data, list) else data.get("data", data.get("markets", []))
+            result = []
+            for m in markets:
+                result.append({
+                    "id": m.get("id", m.get("market_id", "")),
+                    "title": m.get("question", m.get("title", "")),
+                    "yes_probability": round(float(m.get("yes_probability", m.get("outcomePrices", [0.5])[0] if isinstance(m.get("outcomePrices"), list) else 50)), 1),
+                    "volume": float(m.get("volume", 0) or 0),
+                    "liquidity": float(m.get("liquidity", 0) or 0),
+                    "end_date": m.get("endDate", m.get("end_date", "")),
+                    "days_to_resolution": float(m.get("days_to_resolution", 999)),
+                    "category": m.get("category", "unknown"),
+                    "condition_id": m.get("conditionId", m.get("condition_id", "")),
+                    "quick_score": float(m.get("quick_score", 0)),
+                })
+            _markets_cache = {"data": result[:15], "timestamp": time.time()}
+            return result[:15]
+        except Exception as e:
+            logger.error(f"Simmer get_markets failed: {e}")
+            return [{"error": str(e)}]
+
+    # --- Polymarket venue ---
     try:
         params: dict[str, Any] = {
             "limit": min(limit, 100),
@@ -257,8 +293,42 @@ def get_market_detail(market_id: str) -> dict[str, Any]:
         return {"error": str(e), "market_id": market_id}
 
 
-def get_balance(wallet_address: str, custom_rpc: str = "") -> dict[str, Any]:
-    """Get USDC balance on Polygon with multi-RPC fallback."""
+def get_balance(
+    wallet_address: str,
+    custom_rpc: str = "",
+    venue: str = "sim",
+    simmer_api_key: str = "",
+) -> dict[str, Any]:
+    """Get balance. Simmer venue returns $SIM, Polymarket venue returns USDC."""
+    # --- Simmer venue ---
+    if venue == "sim" and simmer_api_key:
+        try:
+            resp = SESSION.get(
+                f"{SIMMER_API}/agents/me",
+                headers={"Authorization": f"Bearer {simmer_api_key}"},
+                timeout=REQUEST_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            balance = float(data.get("balance", data.get("sim_balance", 0)) or 0)
+
+            alert = ""
+            if balance < 5:
+                alert = "CRITICAL: Balance below 5 $SIM. Bot should stop trading."
+            elif balance < 10:
+                alert = "WARNING: Balance below 10 $SIM. Reduce position sizes."
+
+            return {
+                "balance_usdc": round(balance, 2),
+                "wallet": wallet_address,
+                "venue": "sim",
+                "alert": alert,
+            }
+        except Exception as e:
+            logger.warning(f"Simmer get_balance failed: {e}")
+            return {"balance_usdc": 0, "error": str(e), "wallet": wallet_address}
+
+    # --- Polymarket venue (multi-RPC fallback) ---
     rpcs = []
     if custom_rpc:
         rpcs.append(custom_rpc)
@@ -284,6 +354,7 @@ def get_balance(wallet_address: str, custom_rpc: str = "") -> dict[str, Any]:
             return {
                 "balance_usdc": round(balance, 2),
                 "wallet": wallet_address,
+                "venue": "polymarket",
                 "alert": alert,
             }
         except Exception as e:
@@ -293,8 +364,49 @@ def get_balance(wallet_address: str, custom_rpc: str = "") -> dict[str, Any]:
     return {"balance_usdc": 0, "error": "All RPCs failed", "wallet": wallet_address}
 
 
-def get_positions(wallet_address: str) -> list[dict[str, Any]]:
-    """Get open positions from Polymarket Data API."""
+def get_positions(
+    wallet_address: str,
+    venue: str = "sim",
+    simmer_api_key: str = "",
+) -> list[dict[str, Any]]:
+    """Get open positions."""
+    # --- Simmer venue ---
+    if venue == "sim" and simmer_api_key:
+        try:
+            resp = SESSION.get(
+                f"{SIMMER_API}/positions",
+                headers={"Authorization": f"Bearer {simmer_api_key}"},
+                timeout=REQUEST_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if not isinstance(data, list):
+                data = data.get("data", data.get("positions", []))
+
+            positions = []
+            for p in data:
+                size = float(p.get("size", p.get("amount", 0)) or 0)
+                if size <= 0:
+                    continue
+                current_price = float(p.get("currentPrice", p.get("current_price", p.get("price", 0))) or 0)
+                avg_price = float(p.get("avgPrice", p.get("avg_price", p.get("averagePrice", 0))) or 0)
+                pnl = (current_price - avg_price) * size if avg_price > 0 else 0
+                positions.append({
+                    "market_id": p.get("market_id", p.get("market", "")),
+                    "title": p.get("title", p.get("question", "")),
+                    "side": p.get("side", p.get("outcome", "")),
+                    "size": size,
+                    "avg_price": round(avg_price, 4),
+                    "current_price": round(current_price, 4),
+                    "unrealized_pnl": round(pnl, 4),
+                    "in_loss": pnl < -0.5,
+                })
+            return positions
+        except Exception as e:
+            logger.warning(f"Simmer get_positions failed: {e}")
+            return []
+
+    # --- Polymarket venue ---
     try:
         def fetch():
             resp = SESSION.get(
@@ -350,9 +462,11 @@ def place_order(
     api_secret: str = "",
     api_passphrase: str = "",
     dry_run: bool = True,
+    venue: str = "sim",
+    simmer_api_key: str = "",
 ) -> dict[str, Any]:
-    """Place an order on Polymarket via CLOB API."""
-    # --- Dry run mode ---
+    """Place an order via Simmer (sim) or Polymarket CLOB."""
+    # --- Dry run mode (extra safety layer, works on any venue) ---
     if dry_run:
         logger.info(f"[DRY RUN] Would place: {side} {amount_usdc} USDC on '{market_title}'")
         return {
@@ -379,8 +493,48 @@ def place_order(
     if side not in ("YES", "NO"):
         return {"error": f"Invalid side: {side}. Must be YES or NO.", "executed": False}
 
+    # --- Simmer venue ---
+    if venue == "sim" and simmer_api_key:
+        try:
+            resp = SESSION.post(
+                f"{SIMMER_API}/trade",
+                headers={"Authorization": f"Bearer {simmer_api_key}"},
+                json={
+                    "market_id": market_id,
+                    "side": side.lower(),
+                    "amount": amount_usdc,
+                    "venue": "sim",
+                    "reasoning": reason,
+                    "source": "sdk:polybot",
+                },
+                timeout=REQUEST_TIMEOUT,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+
+            logger.info(
+                f"SIM ORDER: {side} on '{market_title}' | "
+                f"Amount: {amount_usdc} $SIM | Reason: {reason}"
+            )
+
+            return {
+                "executed": True,
+                "venue": "sim",
+                "market_id": market_id,
+                "market_title": market_title,
+                "side": side,
+                "amount_usdc": amount_usdc,
+                "reason": reason,
+                "order_response": result,
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        except Exception as e:
+            logger.error(f"Simmer order failed: {e}")
+            return {"error": str(e), "executed": False, "venue": "sim"}
+
+    # --- Polymarket venue ---
     # Check balance first
-    balance_info = get_balance(wallet_address)
+    balance_info = get_balance(wallet_address, venue="polymarket")
     current_balance = balance_info.get("balance_usdc", 0)
     if current_balance < amount_usdc:
         return {
@@ -389,7 +543,7 @@ def place_order(
         }
 
     # Check for duplicate position
-    positions = get_positions(wallet_address)
+    positions = get_positions(wallet_address, venue="polymarket")
     for pos in positions:
         if isinstance(pos, dict) and pos.get("market_id") == market_id:
             return {
@@ -398,13 +552,11 @@ def place_order(
                 "existing_position": pos,
             }
 
-    # --- Execute order via CLOB ---
     try:
         from py_clob_client.clob_types import OrderArgs, OrderType
 
         client = get_clob_client(private_key, wallet_address, api_key, api_secret, api_passphrase)
 
-        # Get market token IDs
         detail = get_market_detail(market_id)
         if "error" in detail:
             return {"error": f"Cannot fetch market detail: {detail['error']}", "executed": False}
@@ -422,10 +574,7 @@ def place_order(
         if not token_ids:
             return {"error": "No CLOB token IDs found for market", "executed": False}
 
-        # YES = index 0, NO = index 1
         token_id = token_ids[0] if side == "YES" else token_ids[1] if len(token_ids) > 1 else token_ids[0]
-
-        # Get current price
         price = detail.get("yes_price", 0.5) if side == "YES" else detail.get("no_price", 0.5)
         size = amount_usdc / price if price > 0 else amount_usdc
 
@@ -446,6 +595,7 @@ def place_order(
 
         return {
             "executed": True,
+            "venue": "polymarket",
             "market_id": market_id,
             "market_title": market_title,
             "side": side,

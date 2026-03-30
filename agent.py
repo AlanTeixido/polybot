@@ -356,11 +356,15 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
     wallet = config["wallet_address"]
     private_key = config.get("private_key", "")
 
+    venue = config.get("venue", "sim")
+    simmer_key = config.get("simmer_api_key", "")
+
     if name == "get_balance":
-        return get_balance(wallet, custom_rpc=config.get("polygon_rpc", ""))
+        return get_balance(wallet, custom_rpc=config.get("polygon_rpc", ""),
+                           venue=venue, simmer_api_key=simmer_key)
 
     elif name == "get_positions":
-        return get_positions(wallet)
+        return get_positions(wallet, venue=venue, simmer_api_key=simmer_key)
 
     elif name == "get_markets":
         return get_markets(
@@ -370,6 +374,8 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
             limit=args.get("limit", 50),
             keyword=args.get("keyword", ""),
             category=args.get("category", ""),
+            venue=venue,
+            simmer_api_key=simmer_key,
         )
 
     elif name == "get_market_detail":
@@ -425,6 +431,8 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
             api_secret=config.get("polymarket_api_secret", ""),
             api_passphrase=config.get("polymarket_api_passphrase", ""),
             dry_run=config.get("dry_run", True),
+            venue=venue,
+            simmer_api_key=simmer_key,
         )
         # Notify via Telegram on trade execution
         if result.get("executed"):
@@ -551,7 +559,12 @@ def check_risk_limits(config: dict, cached_balance: float = -1) -> dict[str, Any
         balance_usdc = cached_balance
     else:
         from tools.polymarket import get_balance
-        balance_info = get_balance(config["wallet_address"], custom_rpc=config.get("polygon_rpc", ""))
+        balance_info = get_balance(
+            config["wallet_address"],
+            custom_rpc=config.get("polygon_rpc", ""),
+            venue=config.get("venue", "sim"),
+            simmer_api_key=config.get("simmer_api_key", ""),
+        )
         balance_usdc = balance_info.get("balance_usdc", -1)
 
     if balance_usdc >= 0:
@@ -604,7 +617,12 @@ class PolybotAgent:
         if now - self._balance_cache_ts < self._balance_cache_ttl and self._cached_balance >= 0:
             return self._cached_balance
         from tools.polymarket import get_balance
-        info = get_balance(self.config["wallet_address"], custom_rpc=self.config.get("polygon_rpc", ""))
+        info = get_balance(
+            self.config["wallet_address"],
+            custom_rpc=self.config.get("polygon_rpc", ""),
+            venue=self.config.get("venue", "sim"),
+            simmer_api_key=self.config.get("simmer_api_key", ""),
+        )
         self._cached_balance = info.get("balance_usdc", -1)
         self._balance_cache_ts = now
         return self._cached_balance
@@ -626,7 +644,11 @@ class PolybotAgent:
             return {"invoke_llm": False, "reasons": ["balance_too_low"], "balance": balance}
 
         # 2. Scan markets (uses 60s cache, essentially free)
-        markets = get_markets(min_volume=self.config.get("min_volume", 500))
+        markets = get_markets(
+            min_volume=self.config.get("min_volume", 500),
+            venue=self.config.get("venue", "sim"),
+            simmer_api_key=self.config.get("simmer_api_key", ""),
+        )
         if markets and not (len(markets) == 1 and "error" in markets[0]):
             current_ids = {m["id"] for m in markets if "id" in m}
 
@@ -881,39 +903,56 @@ class PolybotAgent:
         from tools.polymarket import get_balance, get_positions
         from tools.memory import get_stats
 
+        venue = self.config.get("venue", "sim")
+        simmer_key = self.config.get("simmer_api_key", "")
+        currency = "$SIM" if venue == "sim" else "USDC"
+
         logger.info("=" * 60)
         logger.info("POLYBOT - Autonomous Trading Agent")
         logger.info("=" * 60)
 
-        balance = get_balance(self.config["wallet_address"])
+        if venue == "sim":
+            logger.info("VENUE: SIM (virtual $SIM)")
+        else:
+            logger.info("VENUE: POLYMARKET (real USDC)")
+
+        balance = get_balance(
+            self.config["wallet_address"],
+            custom_rpc=self.config.get("polygon_rpc", ""),
+            venue=venue, simmer_api_key=simmer_key,
+        )
         logger.info(f"Wallet: {self.config['wallet_address']}")
-        logger.info(f"Balance: {balance.get('balance_usdc', '?')} USDC")
+        logger.info(f"Balance: {balance.get('balance_usdc', '?')} {currency}")
         if balance.get("alert"):
             logger.warning(balance["alert"])
 
-        positions = get_positions(self.config["wallet_address"])
-        pos_count = len([p for p in positions if not isinstance(p, dict) or "error" not in p])
+        positions = get_positions(
+            self.config["wallet_address"],
+            venue=venue, simmer_api_key=simmer_key,
+        )
+        pos_count = len([p for p in positions if isinstance(p, dict) and "error" not in p])
         logger.info(f"Open positions: {pos_count}")
 
         stats = get_stats()
         if stats.get("resolved_trades", 0) > 0:
             logger.info(
                 f"Stats: {stats['wins']}W/{stats['losses']}L "
-                f"(WR: {stats['win_rate']}%), PnL: {stats['total_pnl']} USDC"
+                f"(WR: {stats['win_rate']}%), PnL: {stats['total_pnl']} {currency}"
             )
         else:
             logger.info("Stats: No resolved trades yet")
 
-        logger.info(f"Max bet: {self.config.get('max_bet_usdc', 5)} USDC")
-        logger.info(f"Cycle interval: {self.config.get('cycle_interval_seconds', 120)}s")
+        logger.info(f"Max bet: {self.config.get('max_bet_usdc', 5)} {currency}")
+        logger.info(f"Cycle interval: {self.config.get('cycle_interval_seconds', 30)}s")
         if self.config.get("dry_run", True):
             logger.info("MODE: DRY RUN (no real trades)")
         else:
-            logger.info("MODE: LIVE TRADING")
+            logger.info("MODE: LIVE")
         logger.info("=" * 60)
 
         send_telegram(
-            f"*Polybot started*\nBalance: {balance.get('balance_usdc', '?')} USDC\n"
+            f"*Polybot started*\nVenue: {venue}\n"
+            f"Balance: {balance.get('balance_usdc', '?')} {currency}\n"
             f"Open positions: {pos_count}",
             self.config,
         )

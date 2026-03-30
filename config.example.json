@@ -5,6 +5,7 @@
   "polymarket_api_key": "",
   "polymarket_api_secret": "",
   "polymarket_api_passphrase": "",
+  "venue": "sim",
   "dry_run": true,
   "max_bet_usdc": 5,
   "min_volume": 500,
