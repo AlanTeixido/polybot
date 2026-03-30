@@ -155,13 +155,14 @@ def get_markets(
                     "id": m.get("id", m.get("market_id", "")),
                     "title": m.get("question", m.get("title", "")),
                     "yes_probability": yes_prob,
-                    "volume": float(m.get("volume", 0) or 0),
-                    "liquidity": float(m.get("liquidity", 0) or 0),
+                    "volume": "sim",
+                    "liquidity": "sim",
                     "end_date": end_date_str,
                     "days_to_resolution": round(days_to_res, 1),
                     "category": m.get("category", "unknown"),
                     "condition_id": m.get("conditionId", m.get("condition_id", "")),
                     "quick_score": round(quick_score, 3),
+                    "venue": "sim",
                 })
 
             # Sort by distance from 50% (most decisive markets first)

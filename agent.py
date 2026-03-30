@@ -387,10 +387,17 @@ APRENDIZAJE CONTINUO:
 - Cada 50 trades: analizar win rate por categoría via get_performance_by_category()
 - Las lecciones recientes pesan más (decaimiento temporal BM25, half-life 30 días)
 
-EFICIENCIA DE TOKENS:
-- Sé conciso en tu razonamiento. No repitas información que ya tienes.
-- Usa los tools en el orden correcto para minimizar llamadas innecesarias.
-- Si un ciclo no tiene oportunidades claras, di "Sin oportunidades este ciclo" y termina rápido."""
+VENUE SIM (cuando operas en Simmer):
+- Volume y liquidity se muestran como "sim" — son virtuales, NO los uses para filtrar.
+- En SIM, todos los mercados son operables. No descartes por volumen o liquidez.
+- Opera más agresivamente en SIM: es dinero virtual, el objetivo es generar datos.
+- Umbral de probabilidad mínimo: 80% (no 92%) para near-resolution en SIM.
+
+EFICIENCIA DE TOKENS (CRÍTICO — cada token cuesta dinero real):
+- MÁXIMO 3 tool calls por ciclo. No llames get_balance + get_positions + memory_search si ya tienes esos datos en el mensaje inicial.
+- El prescan ya te da: balance, mercados, whale signals. USA esos datos, no los re-fetches.
+- Si no hay oportunidades claras, responde "Sin oportunidades" y termina. No analices cada mercado.
+- Razona en 2-3 frases, no párrafos. Cada palabra cuesta."""
 
 
 # ---------------------------------------------------------------------------
@@ -663,7 +670,7 @@ class PolybotAgent:
         self.config = config
         self.client = anthropic.Anthropic(api_key=config["anthropic_api_key"])
         self.model = "claude-sonnet-4-20250514"
-        self.max_turns = 15  # Max tool-call turns per cycle
+        self.max_turns = 8  # Max tool-call turns per cycle (keep low to save tokens)
         self.running = True
         self.cycle_count = 0
         self.has_near_resolution = False
@@ -895,7 +902,7 @@ class PolybotAgent:
             try:
                 response = self.client.messages.create(
                     model=self.model,
-                    max_tokens=4096,
+                    max_tokens=2048,
                     system=SYSTEM_PROMPT,
                     tools=TOOLS,
                     messages=messages,
