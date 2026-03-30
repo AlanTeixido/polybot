@@ -240,6 +240,23 @@ TOOLS = [
             "required": ["markets"],
         },
     },
+    {
+        "name": "get_simmer_briefing",
+        "description": "Get Simmer portfolio briefing: positions, risk alerts, new markets, performance summary.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "get_simmer_context",
+        "description": "Check Simmer context for a market: real edge calculation, slippage, and TRADE/HOLD recommendation.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "market_id": {"type": "string", "description": "Market ID to check"},
+                "my_probability": {"type": "number", "description": "Your probability estimate (0-100)"},
+            },
+            "required": ["market_id", "my_probability"],
+        },
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -331,9 +348,10 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
     )
     from tools.analysis import (
         analyze_market, get_whale_activity, calculate_edge,
-        detect_opportunities,
+        detect_opportunities, get_simmer_context,
     )
     from tools.news import get_relevant_news
+    import requests as _requests
 
     wallet = config["wallet_address"]
     private_key = config.get("private_key", "")
@@ -406,6 +424,7 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
             api_key=config.get("polymarket_api_key", ""),
             api_secret=config.get("polymarket_api_secret", ""),
             api_passphrase=config.get("polymarket_api_passphrase", ""),
+            dry_run=config.get("dry_run", True),
         )
         # Notify via Telegram on trade execution
         if result.get("executed"):
@@ -423,6 +442,29 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
 
     elif name == "detect_opportunities":
         return detect_opportunities(args.get("markets", []))
+
+    elif name == "get_simmer_briefing":
+        simmer_key = config.get("simmer_api_key", "")
+        if not simmer_key:
+            return {"skipped": "No Simmer API key configured"}
+        try:
+            resp = _requests.get(
+                "https://api.simmer.markets/api/sdk/briefing",
+                headers={"Authorization": f"Bearer {simmer_key}"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logger.warning(f"Simmer briefing failed: {e}")
+            return {"error": str(e)}
+
+    elif name == "get_simmer_context":
+        return get_simmer_context(
+            args["market_id"],
+            args["my_probability"],
+            config.get("simmer_api_key", ""),
+        ) or {"skipped": "No Simmer API key configured"}
 
     else:
         return {"error": f"Unknown tool: {name}"}
@@ -495,19 +537,23 @@ def _check_drawdown(config: dict) -> tuple[bool, str]:
     return False, ""
 
 
-def check_risk_limits(config: dict) -> dict[str, Any]:
+def check_risk_limits(config: dict, cached_balance: float = -1) -> dict[str, Any]:
     """Check if risk limits are breached. Returns risk status and any adjustments."""
     from tools.memory import get_stats
-    from tools.polymarket import get_balance
 
     stats = get_stats()
     streak = stats.get("current_streak", 0)
     alerts: list[str] = []
     should_stop = False
 
-    # Record balance snapshot for drawdown tracking
-    balance_info = get_balance(config["wallet_address"])
-    balance_usdc = balance_info.get("balance_usdc", -1)
+    # Use cached balance if available, otherwise fetch
+    if cached_balance >= 0:
+        balance_usdc = cached_balance
+    else:
+        from tools.polymarket import get_balance
+        balance_info = get_balance(config["wallet_address"])
+        balance_usdc = balance_info.get("balance_usdc", -1)
+
     if balance_usdc >= 0:
         _record_balance(balance_usdc)
 
@@ -545,6 +591,133 @@ class PolybotAgent:
         self.running = True
         self.cycle_count = 0
         self.has_near_resolution = False
+        self.previous_positions: list[dict] = []
+        self.previous_market_ids: set[str] = set()
+        # Balance cache (avoid double RPC calls per cycle)
+        self._cached_balance: float = -1
+        self._balance_cache_ts: float = 0
+        self._balance_cache_ttl: float = 60
+
+    def get_cached_balance(self) -> float:
+        """Get balance with 60s cache to avoid redundant RPC calls."""
+        now = time.time()
+        if now - self._balance_cache_ts < self._balance_cache_ttl and self._cached_balance >= 0:
+            return self._cached_balance
+        from tools.polymarket import get_balance
+        info = get_balance(self.config["wallet_address"])
+        self._cached_balance = info.get("balance_usdc", -1)
+        self._balance_cache_ts = now
+        return self._cached_balance
+
+    def prescan(self) -> dict[str, Any]:
+        """Fast Python-only scan. Returns whether LLM should be invoked and why."""
+        from tools.polymarket import get_markets
+        from tools.analysis import get_whale_activity
+
+        reasons: list[str] = []
+        near_res_markets: list[dict] = []
+        whale_signals: list[dict] = []
+        new_markets: list[str] = []
+
+        # 1. Check balance — if too low, don't bother scanning
+        balance = self.get_cached_balance()
+        if balance >= 0 and balance < 10:
+            logger.info(f"Prescan: balance too low ({balance} USDC), skipping LLM")
+            return {"invoke_llm": False, "reasons": ["balance_too_low"], "balance": balance}
+
+        # 2. Scan markets (uses 60s cache, essentially free)
+        markets = get_markets(min_volume=self.config.get("min_volume", 500))
+        if markets and not (len(markets) == 1 and "error" in markets[0]):
+            current_ids = {m["id"] for m in markets if "id" in m}
+
+            # Near-resolution opportunities
+            for m in markets:
+                prob = m.get("yes_probability", 50)
+                days = m.get("days_to_resolution", 999)
+                max_prob = max(prob, 100 - prob)
+                if max_prob >= 92 and days <= 7:
+                    near_res_markets.append(m)
+
+            if near_res_markets:
+                reasons.append(f"near_resolution:{len(near_res_markets)}")
+
+            # New markets since last cycle
+            if self.previous_market_ids:
+                new_ids = current_ids - self.previous_market_ids
+                new_markets = [m["title"] for m in markets if m.get("id") in new_ids]
+                if new_markets:
+                    reasons.append(f"new_markets:{len(new_markets)}")
+
+            self.previous_market_ids = current_ids
+
+        # 3. Whale activity
+        whale_data = get_whale_activity(
+            self.config.get("whale_wallets", []), hours_back=24
+        )
+        whale_signals = whale_data.get("strong_signals", [])
+        if whale_signals:
+            reasons.append(f"whale_signals:{len(whale_signals)}")
+
+        invoke = len(reasons) > 0
+        if not invoke:
+            logger.info("Prescan: no opportunities detected, skipping LLM")
+        else:
+            logger.info(f"Prescan: opportunities found [{', '.join(reasons)}] -> invoking LLM")
+
+        return {
+            "invoke_llm": invoke,
+            "reasons": reasons,
+            "balance": balance,
+            "near_resolution_markets": near_res_markets,
+            "whale_signals": whale_signals,
+            "new_markets": new_markets,
+            "total_markets_scanned": len(markets) if markets else 0,
+        }
+
+    def _detect_resolved_trades(self) -> None:
+        """Compare previous vs current positions to detect resolved trades."""
+        if not self.previous_positions:
+            return
+
+        from tools.polymarket import get_positions
+        from tools.memory import save_trade_result, save_knowledge
+
+        current = get_positions(self.config["wallet_address"])
+        current_ids = {
+            p["market_id"] for p in current
+            if isinstance(p, dict) and "error" not in p
+        }
+
+        for prev_pos in self.previous_positions:
+            if prev_pos.get("market_id") not in current_ids:
+                # Position disappeared = resolved
+                pnl = prev_pos.get("unrealized_pnl", 0)
+                won = pnl > 0
+                title = prev_pos.get("title", "unknown")
+                side = prev_pos.get("side", "unknown")
+
+                save_trade_result(
+                    market_id=prev_pos.get("market_id", ""),
+                    title=title,
+                    side=side,
+                    amount_usdc=prev_pos.get("size", 0) * prev_pos.get("avg_price", 0),
+                    pnl=round(pnl, 4),
+                    reason="auto-detected resolution",
+                    category="unknown",
+                    resolved=True,
+                )
+
+                outcome = "WIN" if won else "LOSS"
+                save_knowledge(
+                    insight=f"{outcome}: '{title}' ({side}) resolved with PnL {pnl:.4f} USDC. "
+                            f"Avg price: {prev_pos.get('avg_price', 0)}, "
+                            f"Final price: {prev_pos.get('current_price', 0)}",
+                    tags=[outcome.lower(), "resolved", "auto-detected"],
+                )
+
+                msg = f"*Trade resolved: {outcome}*\n{title}\nSide: {side} | PnL: {pnl:.4f} USDC"
+                logger.info(msg.replace("*", ""))
+                send_telegram(msg, self.config)
 
     def run_cycle(self) -> None:
         """Run one full trading cycle."""
@@ -552,8 +725,11 @@ class PolybotAgent:
         self.has_near_resolution = False
         logger.info(f"=== CYCLE {self.cycle_count} START ===")
 
-        # Pre-cycle risk check
-        risk = check_risk_limits(self.config)
+        # Detect resolved trades by comparing with previous cycle positions
+        self._detect_resolved_trades()
+
+        # Pre-cycle risk check (uses cached balance)
+        risk = check_risk_limits(self.config, cached_balance=self.get_cached_balance())
         if risk["should_stop"]:
             for alert in risk["alerts"]:
                 logger.warning(alert)
@@ -561,18 +737,59 @@ class PolybotAgent:
             logger.info("Cycle skipped due to risk limits.")
             return
 
-        # Build initial message with context
+        # --- PRESCAN: fast Python-only check before invoking LLM ---
+        scan = self.prescan()
+        if not scan["invoke_llm"]:
+            # Still snapshot positions for resolved-trade detection
+            from tools.polymarket import get_positions as _get_pos
+            current_pos = _get_pos(self.config["wallet_address"])
+            self.previous_positions = [
+                p for p in current_pos if isinstance(p, dict) and "error" not in p
+            ]
+            logger.info(f"=== CYCLE {self.cycle_count} END (prescan: no opportunities) ===")
+            return
+
+        # Flag near-resolution for faster next cycle
+        if scan.get("near_resolution_markets"):
+            self.has_near_resolution = True
+
+        # Build initial message with prescan context (saves LLM tool calls)
         cycle_msg = (
-            f"Nuevo ciclo de trading (#{self.cycle_count}). "
+            f"Ciclo #{self.cycle_count}. "
             f"Config: max_bet={self.config.get('max_bet_usdc', 5)} USDC, "
-            f"max_positions={self.config.get('max_positions', 10)}. "
-            f"Sigue tu proceso de decisión paso a paso."
+            f"max_positions={self.config.get('max_positions', 10)}.\n"
+            f"Balance: {scan['balance']} USDC.\n"
+            f"Prescan detectó: {', '.join(scan['reasons'])}.\n"
         )
+
+        # Include prescan data so LLM doesn't need to re-fetch
+        if scan.get("near_resolution_markets"):
+            nr = scan["near_resolution_markets"]
+            cycle_msg += f"\nNear-resolution ({len(nr)}):\n"
+            for m in nr[:5]:
+                cycle_msg += (
+                    f"  - {m['title']} | prob: {m['yes_probability']}% | "
+                    f"days: {m['days_to_resolution']} | vol: {m['volume']}\n"
+                )
+
+        if scan.get("whale_signals"):
+            ws = scan["whale_signals"]
+            cycle_msg += f"\nWhale signals ({len(ws)}):\n"
+            for s in ws[:3]:
+                cycle_msg += (
+                    f"  - {s.get('title', s.get('market_id', '?'))} | "
+                    f"side: {s.get('side')} | whales: {s.get('whale_count')}\n"
+                )
+
+        if scan.get("new_markets"):
+            cycle_msg += f"\nNew markets: {', '.join(scan['new_markets'][:5])}\n"
+
+        cycle_msg += "\nAnaliza las oportunidades y ejecuta los mejores trades."
 
         if risk["stats"].get("resolved_trades", 0) > 0:
             s = risk["stats"]
             cycle_msg += (
-                f"\nEstadísticas actuales: {s['wins']}W/{s['losses']}L "
+                f"\nStats: {s['wins']}W/{s['losses']}L "
                 f"(WR: {s['win_rate']}%), PnL: {s['total_pnl']} USDC, "
                 f"Racha: {s['current_streak']}"
             )
@@ -644,6 +861,13 @@ class PolybotAgent:
             if tool_results:
                 messages.append({"role": "user", "content": tool_results})
 
+        # Snapshot current positions for next cycle's resolved-trade detection
+        from tools.polymarket import get_positions as _get_pos
+        current_pos = _get_pos(self.config["wallet_address"])
+        self.previous_positions = [
+            p for p in current_pos if isinstance(p, dict) and "error" not in p
+        ]
+
         logger.info(f"=== CYCLE {self.cycle_count} END (turns: {turn + 1}) ===")
 
     def get_cycle_interval(self) -> int:
@@ -682,6 +906,10 @@ class PolybotAgent:
 
         logger.info(f"Max bet: {self.config.get('max_bet_usdc', 5)} USDC")
         logger.info(f"Cycle interval: {self.config.get('cycle_interval_seconds', 120)}s")
+        if self.config.get("dry_run", True):
+            logger.info("MODE: DRY RUN (no real trades)")
+        else:
+            logger.info("MODE: LIVE TRADING")
         logger.info("=" * 60)
 
         send_telegram(

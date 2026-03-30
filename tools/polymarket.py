@@ -72,6 +72,10 @@ BLACKLIST_KEYWORDS = [
 ]
 BLACKLIST_CATEGORIES = ["esports", "e-sports"]
 
+# Market cache (60 seconds)
+_markets_cache: dict[str, Any] = {"data": [], "timestamp": 0}
+CACHE_TTL = 60
+
 
 def _retry(func, retries: int = 3, backoff: float = 2.0):
     """Retry with exponential backoff."""
@@ -97,6 +101,13 @@ def get_markets(
     category: str = "",
 ) -> list[dict[str, Any]]:
     """Fetch and filter available markets from Polymarket."""
+    global _markets_cache
+
+    # Return cached data if fresh
+    if time.time() - _markets_cache["timestamp"] < CACHE_TTL and _markets_cache["data"]:
+        logger.debug("Returning cached markets")
+        return _markets_cache["data"]
+
     try:
         params: dict[str, Any] = {
             "limit": min(limit, 100),
@@ -179,9 +190,20 @@ def get_markets(
                 "condition_id": m.get("conditionId", ""),
             })
 
-        # Sort by volume descending
-        filtered.sort(key=lambda x: x["volume"], reverse=True)
-        return filtered[:limit]
+        # Quick score for pre-filtering: prioritize near-resolution + high volume + high probability
+        for m in filtered:
+            prob = m["yes_probability"]
+            prob_score = prob / 100 if prob > 50 else (100 - prob) / 100
+            vol_score = min(m["volume"] / 50000, 1.0)
+            time_score = max(0, (7 - m["days_to_resolution"]) / 7)
+            m["quick_score"] = round(prob_score + vol_score + time_score, 3)
+
+        filtered.sort(key=lambda x: x["quick_score"], reverse=True)
+        result = filtered[:15]
+
+        # Update cache
+        _markets_cache = {"data": result, "timestamp": time.time()}
+        return result
 
     except Exception as e:
         logger.error(f"get_markets failed: {e}")
@@ -315,8 +337,22 @@ def place_order(
     api_key: str = "",
     api_secret: str = "",
     api_passphrase: str = "",
+    dry_run: bool = True,
 ) -> dict[str, Any]:
     """Place an order on Polymarket via CLOB API."""
+    # --- Dry run mode ---
+    if dry_run:
+        logger.info(f"[DRY RUN] Would place: {side} {amount_usdc} USDC on '{market_title}'")
+        return {
+            "executed": False,
+            "dry_run": True,
+            "market_id": market_id,
+            "market_title": market_title,
+            "side": side,
+            "amount_usdc": amount_usdc,
+            "reason": reason,
+        }
+
     # --- Safety checks ---
     if amount_usdc <= 0:
         return {"error": "Amount must be positive", "executed": False}

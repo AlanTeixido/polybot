@@ -263,6 +263,26 @@ def calculate_edge(my_estimate: float, market_probability: float) -> dict[str, A
     }
 
 
+def get_simmer_context(
+    market_id: str, my_probability: float, simmer_api_key: str = ""
+) -> dict[str, Any] | None:
+    """Get Simmer context for a market: real edge, slippage, recommendation."""
+    if not simmer_api_key:
+        return None
+    try:
+        resp = SESSION.get(
+            f"https://api.simmer.markets/api/sdk/context/{market_id}",
+            params={"my_probability": my_probability},
+            headers={"Authorization": f"Bearer {simmer_api_key}"},
+            timeout=REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        logger.warning(f"Simmer context failed for {market_id}: {e}")
+        return None
+
+
 def detect_opportunities(markets: list[dict]) -> list[dict]:
     """Score and rank a list of markets for opportunities."""
     scored: list[dict] = []

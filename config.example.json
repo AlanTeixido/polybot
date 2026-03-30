@@ -5,11 +5,12 @@
   "polymarket_api_key": "",
   "polymarket_api_secret": "",
   "polymarket_api_passphrase": "",
+  "dry_run": true,
   "max_bet_usdc": 5,
   "min_volume": 500,
   "max_positions": 10,
-  "cycle_interval_seconds": 120,
-  "near_resolution_interval_seconds": 30,
+  "cycle_interval_seconds": 30,
+  "near_resolution_interval_seconds": 10,
   "telegram_bot_token": "",
   "telegram_chat_id": "",
   "whale_wallets": [
@@ -19,5 +20,6 @@
     "0xee613b3f",
     "0x17db3fcd"
   ],
-  "news_api_key": ""
+  "news_api_key": "",
+  "simmer_api_key": ""
 }
