@@ -502,16 +502,10 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
             venue=venue,
             simmer_api_key=simmer_key,
         )
-        # Notify via Telegram on trade execution
-        venue_label = config.get("venue", "sim")
-        currency = "$SIM" if venue_label == "sim" else "USDC"
+        # Notify via Telegram only on real execution (not dry run)
         if result.get("executed"):
-            msg = (
-                f"*TRADE*\n"
-                f"{args['side']} | {args['amount_usdc']} {currency}\n"
-                f"{args.get('market_title', '')}\n"
-                f"_{args.get('reason', '')[:100]}_"
-            )
+            currency = "$SIM" if config.get("venue", "sim") == "sim" else "USDC"
+            msg = f"{args['side']} {args['amount_usdc']}{currency} | {args.get('market_title', '')}"
             send_telegram(msg, config)
         return result
 
