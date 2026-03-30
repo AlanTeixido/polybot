@@ -625,16 +625,20 @@ def check_risk_limits(config: dict, cached_balance: float = -1) -> dict[str, Any
     if balance_usdc >= 0:
         _record_balance(balance_usdc)
 
-    # 5 consecutive losses -> stop
-    if streak <= -5:
+    # 5 consecutive losses -> stop (only in real venue, SIM keeps running)
+    venue = config.get("venue", "sim")
+    if streak <= -5 and venue != "sim":
         alerts.append(f"5+ consecutive losses (streak: {streak}). STOPPING.")
         should_stop = True
+    elif streak <= -5 and venue == "sim":
+        logger.info(f"SIM venue: {-streak} consecutive losses, continuing (SIM mode)")
 
-    # 30% drawdown in 7 days -> halve max_bet_usdc
-    drawdown_triggered, drawdown_msg = _check_drawdown(config)
-    if drawdown_triggered:
-        alerts.append(drawdown_msg)
-        logger.warning(drawdown_msg)
+    # 30% drawdown in 7 days -> halve max_bet_usdc (only in real venue)
+    if venue != "sim":
+        drawdown_triggered, drawdown_msg = _check_drawdown(config)
+        if drawdown_triggered:
+            alerts.append(drawdown_msg)
+            logger.warning(drawdown_msg)
 
     return {
         "streak": streak,
