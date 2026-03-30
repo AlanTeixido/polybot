@@ -431,25 +431,103 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
 # ---------------------------------------------------------------------------
 # Risk management
 # ---------------------------------------------------------------------------
+BALANCE_HISTORY_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "memory", "balance_history.json"
+)
+
+
+def _record_balance(balance_usdc: float) -> None:
+    """Append current balance to history for drawdown tracking."""
+    os.makedirs(os.path.dirname(BALANCE_HISTORY_FILE), exist_ok=True)
+    history = []
+    try:
+        with open(BALANCE_HISTORY_FILE, "r") as f:
+            history = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+    history.append({"balance": balance_usdc, "timestamp": time.time()})
+
+    # Keep only last 30 days of snapshots
+    cutoff = time.time() - (30 * 86400)
+    history = [h for h in history if h["timestamp"] >= cutoff]
+
+    with open(BALANCE_HISTORY_FILE, "w") as f:
+        json.dump(history, f)
+
+
+def _check_drawdown(config: dict) -> tuple[bool, str]:
+    """Check if balance has dropped 30%+ in last 7 days. Returns (triggered, message)."""
+    try:
+        with open(BALANCE_HISTORY_FILE, "r") as f:
+            history = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False, ""
+
+    if not history:
+        return False, ""
+
+    seven_days_ago = time.time() - (7 * 86400)
+    old_snapshots = [h for h in history if h["timestamp"] <= seven_days_ago + 3600]
+
+    if not old_snapshots:
+        return False, ""
+
+    # Use the earliest snapshot within the 7-day window
+    reference_balance = old_snapshots[-1]["balance"]
+    current_balance = history[-1]["balance"]
+
+    if reference_balance <= 0:
+        return False, ""
+
+    drawdown_pct = (reference_balance - current_balance) / reference_balance * 100
+
+    if drawdown_pct >= 30:
+        new_max_bet = max(config.get("max_bet_usdc", 5) / 2, 1.0)
+        config["max_bet_usdc"] = new_max_bet
+        msg = (
+            f"DRAWDOWN ALERT: Balance dropped {drawdown_pct:.1f}% in 7 days "
+            f"({reference_balance:.2f} -> {current_balance:.2f} USDC). "
+            f"max_bet_usdc reduced to {new_max_bet:.1f}"
+        )
+        return True, msg
+
+    return False, ""
+
+
 def check_risk_limits(config: dict) -> dict[str, Any]:
     """Check if risk limits are breached. Returns risk status and any adjustments."""
     from tools.memory import get_stats
+    from tools.polymarket import get_balance
 
     stats = get_stats()
     streak = stats.get("current_streak", 0)
     alerts: list[str] = []
     should_stop = False
 
+    # Record balance snapshot for drawdown tracking
+    balance_info = get_balance(config["wallet_address"])
+    balance_usdc = balance_info.get("balance_usdc", -1)
+    if balance_usdc >= 0:
+        _record_balance(balance_usdc)
+
     # 5 consecutive losses -> stop
     if streak <= -5:
         alerts.append(f"5+ consecutive losses (streak: {streak}). STOPPING.")
         should_stop = True
+
+    # 30% drawdown in 7 days -> halve max_bet_usdc
+    drawdown_triggered, drawdown_msg = _check_drawdown(config)
+    if drawdown_triggered:
+        alerts.append(drawdown_msg)
+        logger.warning(drawdown_msg)
 
     return {
         "streak": streak,
         "alerts": alerts,
         "should_stop": should_stop,
         "stats": stats,
+        "balance_usdc": balance_usdc,
     }
 
 

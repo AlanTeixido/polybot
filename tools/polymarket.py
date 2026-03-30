@@ -16,7 +16,7 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
 
 # Polygon USDC.e contract
-USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+USDC_ADDRESS = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
 USDC_ABI = json.dumps([{
     "constant": True,
     "inputs": [{"name": "_owner", "type": "address"}],
@@ -26,15 +26,49 @@ USDC_ABI = json.dumps([{
 }])
 POLYGON_RPC = "https://polygon-rpc.com"
 
+# ClobClient singleton - initialized once, reused for all orders
+_clob_client = None
+
+
+def get_clob_client(
+    private_key: str,
+    wallet_address: str,
+    api_key: str = "",
+    api_secret: str = "",
+    api_passphrase: str = "",
+):
+    """Return a singleton ClobClient, initializing only once."""
+    global _clob_client
+    if _clob_client is None:
+        try:
+            from py_clob_client.client import ClobClient
+            _clob_client = ClobClient(
+                CLOB_API,
+                key=api_key or None,
+                chain_id=137,
+                private_key=private_key,
+                signature_type=2,
+                funder=wallet_address,
+            )
+            if api_key and api_secret and api_passphrase:
+                _clob_client.set_api_creds(_clob_client.create_or_derive_api_creds())
+            logger.info("ClobClient initialized (singleton)")
+        except Exception as e:
+            logger.error(f"ClobClient init failed: {e}")
+            raise
+    return _clob_client
+
+
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "Polybot/1.0"})
 REQUEST_TIMEOUT = 15
 
 # Blacklist keywords for auto-filtering
 BLACKLIST_KEYWORDS = [
-    "exact price", "above", "below", "higher than", "lower than",
+    "exact price",
     "btc >", "btc <", "eth >", "eth <", "bitcoin >", "bitcoin <",
     "ethereum >", "ethereum <", "sol >", "sol <",
+    "will reach", "will hit",
 ]
 BLACKLIST_CATEGORIES = ["esports", "e-sports"]
 
@@ -318,23 +352,9 @@ def place_order(
 
     # --- Execute order via CLOB ---
     try:
-        from py_clob_client.client import ClobClient
         from py_clob_client.clob_types import OrderArgs, OrderType
 
-        host = CLOB_API
-        chain_id = 137  # Polygon
-
-        client = ClobClient(
-            host,
-            key=api_key or None,
-            chain_id=chain_id,
-            private_key=private_key,
-            signature_type=2,
-            funder=wallet_address,
-        )
-
-        if api_key and api_secret and api_passphrase:
-            client.set_api_creds(client.create_or_derive_api_creds())
+        client = get_clob_client(private_key, wallet_address, api_key, api_secret, api_passphrase)
 
         # Get market token IDs
         detail = get_market_detail(market_id)
