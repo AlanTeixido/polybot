@@ -56,9 +56,65 @@ def send_telegram(message: str, config: dict) -> None:
     try:
         import requests
         url = f"https://api.telegram.org/bot{token}/sendMessage"
-        requests.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}, timeout=10)
+        requests.post(url, json={
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True,
+        }, timeout=10)
     except Exception as e:
         logger.warning(f"Telegram send failed: {e}")
+
+
+def send_daily_summary(config: dict) -> None:
+    """Send daily performance summary via Telegram."""
+    from tools.memory import get_stats, get_performance_by_category
+    from tools.polymarket import get_balance, get_positions
+
+    venue = config.get("venue", "sim")
+    currency = "$SIM" if venue == "sim" else "USDC"
+
+    stats = get_stats()
+    balance = get_balance(
+        config["wallet_address"],
+        venue=venue,
+        simmer_api_key=config.get("simmer_api_key", ""),
+    )
+    positions = get_positions(
+        config["wallet_address"],
+        venue=venue,
+        simmer_api_key=config.get("simmer_api_key", ""),
+    )
+    pos_count = len([p for p in positions if isinstance(p, dict) and "error" not in p])
+    categories = get_performance_by_category()
+
+    bal = balance.get("balance_usdc", "?")
+    wr = stats.get("win_rate", 0)
+    wins = stats.get("wins", 0)
+    losses = stats.get("losses", 0)
+    pnl = stats.get("total_pnl", 0)
+    streak = stats.get("current_streak", 0)
+
+    # Best/worst categories
+    cat_lines = ""
+    if categories:
+        sorted_cats = sorted(categories.items(), key=lambda x: x[1]["pnl"], reverse=True)
+        for cat, data in sorted_cats[:3]:
+            emoji = "+" if data["pnl"] >= 0 else ""
+            cat_lines += f"  {cat}: {data['wins']}W/{data['losses']}L ({emoji}{data['pnl']} {currency})\n"
+
+    msg = (
+        f"*DAILY SUMMARY*\n"
+        f"Balance: {bal} {currency}\n"
+        f"Open positions: {pos_count}\n"
+        f"Record: {wins}W/{losses}L (WR: {wr}%)\n"
+        f"Total PnL: {'+' if pnl >= 0 else ''}{pnl} {currency}\n"
+        f"Streak: {streak}\n"
+    )
+    if cat_lines:
+        msg += f"\n*By category:*\n{cat_lines}"
+
+    send_telegram(msg, config)
 
 
 # ---------------------------------------------------------------------------
@@ -440,12 +496,14 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
             simmer_api_key=simmer_key,
         )
         # Notify via Telegram on trade execution
+        venue_label = config.get("venue", "sim")
+        currency = "$SIM" if venue_label == "sim" else "USDC"
         if result.get("executed"):
             msg = (
-                f"*TRADE EXECUTED*\n"
-                f"Market: {args.get('market_title', '')}\n"
-                f"Side: {args['side']} | Amount: {args['amount_usdc']} USDC\n"
-                f"Reason: {args.get('reason', '')}"
+                f"*TRADE*\n"
+                f"{args['side']} | {args['amount_usdc']} {currency}\n"
+                f"{args.get('market_title', '')}\n"
+                f"_{args.get('reason', '')[:100]}_"
             )
             send_telegram(msg, config)
         return result
@@ -749,7 +807,9 @@ class PolybotAgent:
                     tags=[outcome.lower(), "resolved", "auto-detected"],
                 )
 
-                msg = f"*Trade resolved: {outcome}*\n{title}\nSide: {side} | PnL: {pnl:.4f} USDC"
+                currency = "$SIM" if self.config.get("venue", "sim") == "sim" else "USDC"
+                pnl_sign = "+" if pnl >= 0 else ""
+                msg = f"*{outcome}* {pnl_sign}{pnl:.2f} {currency}\n{title}\nSide: {side}"
                 logger.info(msg.replace("*", ""))
                 send_telegram(msg, self.config)
 
@@ -962,10 +1022,14 @@ class PolybotAgent:
             logger.info("MODE: LIVE")
         logger.info("=" * 60)
 
+        mode = "DRY RUN" if self.config.get("dry_run", True) else "LIVE"
         send_telegram(
-            f"*Polybot started*\nVenue: {venue}\n"
+            f"*Polybot started*\n"
+            f"Venue: {venue} | Mode: {mode}\n"
             f"Balance: {balance.get('balance_usdc', '?')} {currency}\n"
-            f"Open positions: {pos_count}",
+            f"Positions: {pos_count}\n"
+            f"Max bet: {self.config.get('max_bet_usdc', 5)} {currency}\n"
+            f"Cycle: {self.config.get('cycle_interval_seconds', 30)}s",
             self.config,
         )
 
@@ -976,6 +1040,7 @@ class PolybotAgent:
 def main() -> None:
     config = load_config()
     agent = PolybotAgent(config)
+    last_daily_summary: str = ""
 
     # Graceful shutdown
     def shutdown(sig, frame):
@@ -995,6 +1060,16 @@ def main() -> None:
             send_telegram(f"*ERROR*: Cycle failed: {e}", config)
             time.sleep(60)
             continue
+
+        # Daily summary at 00:00 UTC
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        if today != last_daily_summary and time.strftime("%H", time.gmtime()) == "00":
+            try:
+                send_daily_summary(config)
+                last_daily_summary = today
+                logger.info("Daily summary sent")
+            except Exception as e:
+                logger.warning(f"Daily summary failed: {e}")
 
         interval = agent.get_cycle_interval()
         logger.info(f"Next cycle in {interval}s...")
