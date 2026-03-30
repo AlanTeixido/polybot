@@ -1,0 +1,7 @@
+anthropic>=0.40.0
+requests>=2.31.0
+rank-bm25>=0.2.2
+py-clob-client>=0.17.0
+eth-account>=0.11.0
+web3>=6.0.0
+python-telegram-bot>=20.0

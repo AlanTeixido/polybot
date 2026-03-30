@@ -1,0 +1,23 @@
+{
+  "anthropic_api_key": "YOUR_KEY",
+  "wallet_address": "0xe4d95916ad3d7bfC1bbFcB585f24213B6016107f",
+  "private_key": "YOUR_PRIVATE_KEY",
+  "polymarket_api_key": "",
+  "polymarket_api_secret": "",
+  "polymarket_api_passphrase": "",
+  "max_bet_usdc": 5,
+  "min_volume": 500,
+  "max_positions": 10,
+  "cycle_interval_seconds": 120,
+  "near_resolution_interval_seconds": 30,
+  "telegram_bot_token": "",
+  "telegram_chat_id": "",
+  "whale_wallets": [
+    "0xdb27bf2a",
+    "0x9d84ce03",
+    "0xd218e474",
+    "0xee613b3f",
+    "0x17db3fcd"
+  ],
+  "news_api_key": ""
+}

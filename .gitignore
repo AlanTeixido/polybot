@@ -1,0 +1,12 @@
+config.json
+.env
+.env.*
+memory/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+*.log.*
+.vscode/
+.idea/
+node_modules/
