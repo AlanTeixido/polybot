@@ -652,12 +652,14 @@ class PolybotAgent:
         if markets and not (len(markets) == 1 and "error" in markets[0]):
             current_ids = {m["id"] for m in markets if "id" in m}
 
-            # Near-resolution opportunities
+            # Near-resolution opportunities (lower threshold for sim venue)
+            venue = self.config.get("venue", "sim")
+            nr_threshold = 80 if venue == "sim" else 92
             for m in markets:
                 prob = m.get("yes_probability", 50)
                 days = m.get("days_to_resolution", 999)
                 max_prob = max(prob, 100 - prob)
-                if max_prob >= 92 and days <= 7:
+                if max_prob >= nr_threshold and days <= 7:
                     near_res_markets.append(m)
 
             if near_res_markets:
@@ -679,6 +681,11 @@ class PolybotAgent:
         whale_signals = whale_data.get("strong_signals", [])
         if whale_signals:
             reasons.append(f"whale_signals:{len(whale_signals)}")
+
+        # SIM venue: always invoke LLM if there are any markets (operate more)
+        if self.config.get("venue", "sim") == "sim" and markets and not (len(markets) == 1 and "error" in markets[0]):
+            if not reasons:
+                reasons.append("sim_venue_active")
 
         invoke = len(reasons) > 0
         if not invoke:
