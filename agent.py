@@ -357,7 +357,7 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
     private_key = config.get("private_key", "")
 
     if name == "get_balance":
-        return get_balance(wallet)
+        return get_balance(wallet, custom_rpc=config.get("polygon_rpc", ""))
 
     elif name == "get_positions":
         return get_positions(wallet)
@@ -551,7 +551,7 @@ def check_risk_limits(config: dict, cached_balance: float = -1) -> dict[str, Any
         balance_usdc = cached_balance
     else:
         from tools.polymarket import get_balance
-        balance_info = get_balance(config["wallet_address"])
+        balance_info = get_balance(config["wallet_address"], custom_rpc=config.get("polygon_rpc", ""))
         balance_usdc = balance_info.get("balance_usdc", -1)
 
     if balance_usdc >= 0:
@@ -604,7 +604,7 @@ class PolybotAgent:
         if now - self._balance_cache_ts < self._balance_cache_ttl and self._cached_balance >= 0:
             return self._cached_balance
         from tools.polymarket import get_balance
-        info = get_balance(self.config["wallet_address"])
+        info = get_balance(self.config["wallet_address"], custom_rpc=self.config.get("polygon_rpc", ""))
         self._cached_balance = info.get("balance_usdc", -1)
         self._balance_cache_ts = now
         return self._cached_balance

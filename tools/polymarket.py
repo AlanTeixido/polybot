@@ -24,7 +24,12 @@ USDC_ABI = json.dumps([{
     "outputs": [{"name": "balance", "type": "uint256"}],
     "type": "function",
 }])
-POLYGON_RPC = "https://polygon-rpc.com"
+POLYGON_RPCS = [
+    "https://polygon-bor-rpc.publicnode.com",
+    "https://rpc.ankr.com/polygon",
+    "https://polygon.llamarpc.com",
+    "https://rpc-mainnet.matic.quiknode.pro",
+]
 
 # ClobClient singleton - initialized once, reused for all orders
 _clob_client = None
@@ -252,42 +257,49 @@ def get_market_detail(market_id: str) -> dict[str, Any]:
         return {"error": str(e), "market_id": market_id}
 
 
-def get_balance(wallet_address: str) -> dict[str, Any]:
-    """Get USDC.e balance on Polygon."""
-    try:
-        w3 = Web3(Web3.HTTPProvider(POLYGON_RPC))
-        usdc = w3.eth.contract(
-            address=Web3.to_checksum_address(USDC_ADDRESS),
-            abi=json.loads(USDC_ABI),
-        )
-        raw_balance = usdc.functions.balanceOf(
-            Web3.to_checksum_address(wallet_address)
-        ).call()
-        balance = raw_balance / 1e6  # USDC has 6 decimals
+def get_balance(wallet_address: str, custom_rpc: str = "") -> dict[str, Any]:
+    """Get USDC balance on Polygon with multi-RPC fallback."""
+    rpcs = []
+    if custom_rpc:
+        rpcs.append(custom_rpc)
+    rpcs.extend(POLYGON_RPCS)
 
-        alert = ""
-        if balance < 5:
-            alert = "CRITICAL: Balance below 5 USDC. Bot should stop trading."
-        elif balance < 10:
-            alert = "WARNING: Balance below 10 USDC. Reduce position sizes."
+    checksum_wallet = Web3.to_checksum_address(wallet_address)
+    checksum_usdc = Web3.to_checksum_address(USDC_ADDRESS)
+    abi = json.loads(USDC_ABI)
 
-        return {
-            "balance_usdc": round(balance, 2),
-            "wallet": wallet_address,
-            "alert": alert,
-        }
-    except Exception as e:
-        logger.error(f"get_balance failed: {e}")
-        return {"error": str(e), "balance_usdc": -1}
+    for rpc_url in rpcs:
+        try:
+            w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 10}))
+            usdc = w3.eth.contract(address=checksum_usdc, abi=abi)
+            raw_balance = usdc.functions.balanceOf(checksum_wallet).call()
+            balance = raw_balance / 1e6  # USDC has 6 decimals
+
+            alert = ""
+            if balance < 5:
+                alert = "CRITICAL: Balance below 5 USDC. Bot should stop trading."
+            elif balance < 10:
+                alert = "WARNING: Balance below 10 USDC. Reduce position sizes."
+
+            return {
+                "balance_usdc": round(balance, 2),
+                "wallet": wallet_address,
+                "alert": alert,
+            }
+        except Exception as e:
+            logger.warning(f"RPC {rpc_url} failed: {e}")
+
+    logger.error(f"All RPCs failed for get_balance({wallet_address})")
+    return {"balance_usdc": 0, "error": "All RPCs failed", "wallet": wallet_address}
 
 
 def get_positions(wallet_address: str) -> list[dict[str, Any]]:
-    """Get open positions for the wallet."""
+    """Get open positions from Polymarket Data API."""
     try:
         def fetch():
             resp = SESSION.get(
-                f"{GAMMA_API}/positions",
-                params={"user": wallet_address},
+                "https://data-api.polymarket.com/positions",
+                params={"user": wallet_address, "limit": 50, "offset": 0},
                 timeout=REQUEST_TIMEOUT,
             )
             resp.raise_for_status()
@@ -321,8 +333,8 @@ def get_positions(wallet_address: str) -> list[dict[str, Any]]:
         return positions
 
     except Exception as e:
-        logger.error(f"get_positions failed: {e}")
-        return [{"error": str(e)}]
+        logger.warning(f"get_positions failed: {e}")
+        return []
 
 
 def place_order(
