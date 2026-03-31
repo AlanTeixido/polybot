@@ -643,6 +643,20 @@ def place_order(
                 # Same side = adding to position, allow it
                 break
 
+    # --- Spread check (Polymarket only — SIM has no real spread) ---
+    if venue != "sim":
+        detail = get_market_detail(market_id, venue=venue, simmer_api_key=simmer_api_key)
+        if "error" not in detail:
+            yes_p = detail.get("yes_price", 0.5)
+            no_p = detail.get("no_price", 0.5)
+            spread = abs(1 - yes_p - no_p)
+            max_spread = 0.05
+            if spread > max_spread:
+                return {
+                    "error": f"Spread too high: {spread:.1%}. Max allowed: {max_spread:.1%}",
+                    "executed": False,
+                }
+
     # --- Simmer venue ---
     if venue == "sim" and simmer_api_key:
         try:

@@ -658,8 +658,8 @@ class PolybotAgent:
     def __init__(self, config: dict):
         self.config = config
         self.client = anthropic.Anthropic(api_key=config["anthropic_api_key"])
-        self.model = "claude-sonnet-4-20250514"
-        self.max_turns = 8  # Max tool-call turns per cycle (keep low to save tokens)
+        self.model = "claude-haiku-4-5-20251001"
+        self.max_turns = 4  # Keep very low to save tokens
         self.running = True
         self.cycle_count = 0
         self.has_near_resolution = False
@@ -909,7 +909,7 @@ class PolybotAgent:
             try:
                 response = self.client.messages.create(
                     model=self.model,
-                    max_tokens=2048,
+                    max_tokens=1024,
                     system=SYSTEM_PROMPT,
                     tools=TOOLS,
                     messages=messages,
