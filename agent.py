@@ -479,25 +479,9 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
             venue=venue,
             simmer_api_key=simmer_key,
         )
-        # Count executed trades and notify with running totals
+        # Count executed trades (no Telegram spam — stats go in periodic summary)
         if result.get("executed"):
             config["_trades_this_cycle"] = trades_this_cycle + 1
-            currency = "$SIM" if config.get("venue", "sim") == "sim" else "USDC"
-
-            # Get current stats for context
-            from tools.memory import get_stats as _get_stats
-            st = _get_stats()
-            bal = config.get("_cached_balance", "?")
-            wr = st.get("win_rate", 0)
-            total_pnl = st.get("total_pnl", 0)
-            pnl_sign = "+" if total_pnl >= 0 else ""
-            total_trades = st.get("total_trades", 0) + 1
-
-            msg = (
-                f"{args['side']} {args['amount_usdc']}{currency} | {args.get('market_title', '')}\n"
-                f"Trade #{total_trades} | WR: {wr}% | PnL: {pnl_sign}{total_pnl}{currency} | Bal: {bal}{currency}"
-            )
-            send_telegram(msg, config)
         return result
 
     elif name == "get_trade_history":
@@ -811,18 +795,7 @@ class PolybotAgent:
                     tags=[outcome.lower(), "resolved"],
                 )
 
-                # Detailed notification with running stats
-                currency = "$SIM" if venue == "sim" else "USDC"
-                pnl_sign = "+" if pnl >= 0 else ""
-                st = get_stats()
-                msg = (
-                    f"{'W' if won else 'L'} {pnl_sign}{pnl:.2f}{currency} | {title}\n"
-                    f"{side} {amount}{currency} @ {prev_pos.get('avg_price', 0)}\n"
-                    f"Record: {st.get('wins', 0)}W/{st.get('losses', 0)}L | "
-                    f"Total: {'+' if st.get('total_pnl', 0) >= 0 else ''}{st.get('total_pnl', 0)}{currency}"
-                )
-                logger.info(msg.replace("*", ""))
-                send_telegram(msg, self.config)
+                logger.info(f"Resolved: {outcome} {pnl:.2f} | {title} ({side})")
 
     def run_cycle(self) -> None:
         """Run one full trading cycle."""
@@ -1054,7 +1027,7 @@ class PolybotAgent:
 def main() -> None:
     config = load_config()
     agent = PolybotAgent(config)
-    last_daily_summary: str = ""
+    last_summary_hour: str = ""
 
     # Graceful shutdown
     def shutdown(sig, frame):
@@ -1071,17 +1044,17 @@ def main() -> None:
             agent.run_cycle()
         except Exception as e:
             logger.error(f"Cycle failed: {e}", exc_info=True)
-            send_telegram(f"*ERROR*: Cycle failed: {e}", config)
             time.sleep(60)
             continue
 
-        # Daily summary at 00:00 UTC
-        today = time.strftime("%Y-%m-%d", time.gmtime())
-        if today != last_daily_summary and time.strftime("%H", time.gmtime()) == "00":
+        # Summary every 6 hours (00:00, 06:00, 12:00, 18:00 UTC)
+        current_hour = time.strftime("%Y-%m-%d-%H", time.gmtime())
+        hour_int = int(time.strftime("%H", time.gmtime()))
+        if current_hour != last_summary_hour and hour_int % 6 == 0:
             try:
                 send_daily_summary(config)
-                last_daily_summary = today
-                logger.info("Daily summary sent")
+                last_summary_hour = current_hour
+                logger.info("Periodic summary sent")
             except Exception as e:
                 logger.warning(f"Daily summary failed: {e}")
 
