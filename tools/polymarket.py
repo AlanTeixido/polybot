@@ -119,12 +119,21 @@ def get_markets(
     # --- Simmer venue ---
     if venue == "sim" and simmer_api_key:
         try:
+            # Try /opportunities first (ranked by edge+liquidity+urgency)
             resp = SESSION.get(
-                f"{SIMMER_API}/markets",
+                f"{SIMMER_API}/markets/opportunities",
                 params={"limit": 50},
                 headers={"Authorization": f"Bearer {simmer_api_key}"},
                 timeout=REQUEST_TIMEOUT,
             )
+            if resp.status_code != 200:
+                # Fallback to /markets
+                resp = SESSION.get(
+                    f"{SIMMER_API}/markets",
+                    params={"limit": 50},
+                    headers={"Authorization": f"Bearer {simmer_api_key}"},
+                    timeout=REQUEST_TIMEOUT,
+                )
             resp.raise_for_status()
             data = resp.json()
             markets = data if isinstance(data, list) else data.get("data", data.get("markets", []))
@@ -178,9 +187,15 @@ def get_markets(
                     "spread", "o/u", "over/under", "points o/u",
                 ]
 
-                # --- NOISE: No edge (temperature, exact price, crypto FDV, esports maps) ---
-                noise_kw = [
+                # --- TIER 1 BONUS: Weather markets (91.5% WR with forecast data) ---
+                weather_kw = [
                     "temperature", "highest temp", "lowest temp", "°c", "°f",
+                    "weather", "rain", "snow", "wind",
+                ]
+                is_weather = any(kw in title_lower for kw in weather_kw)
+
+                # --- NOISE: No edge (crypto FDV, esports maps, exact crypto price) ---
+                noise_kw = [
                     "exact price", "close above", "close below",
                     "will reach", "will hit",
                     "fdv above", "fdv below", "market cap above",
@@ -192,6 +207,9 @@ def get_markets(
                 if any(kw in title_lower for kw in noise_kw):
                     tier = "noise"
                     quick_score = -1.0  # Will be filtered out
+                elif is_weather:
+                    tier = "tier1-weather"
+                    quick_score = 3.0 + abs(yes_prob - 50) / 50  # Highest priority
                 elif any(kw in title_lower for kw in tier1_kw) or any(c in cat_lower for c in tier1_cat):
                     tier = "tier1"
                     quick_score = 2.0 + abs(yes_prob - 50) / 50
