@@ -297,6 +297,18 @@ TOOLS = [
         },
     },
     {
+        "name": "get_weather_forecast",
+        "description": "Get actual weather forecast for a city from NWS (US) or Open-Meteo (global). Returns high/low temps in °C and °F. Use this for weather markets — compare forecast vs market price for edge.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "city": {"type": "string", "description": "City name (e.g. 'Atlanta', 'Shanghai', 'Istanbul')"},
+                "target_date": {"type": "string", "description": "Date to forecast (YYYY-MM-DD). Optional — omit for next 7 days."},
+            },
+            "required": ["city"],
+        },
+    },
+    {
         "name": "get_simmer_briefing",
         "description": "Get Simmer portfolio briefing: positions, risk alerts, new markets, performance summary.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
@@ -367,7 +379,7 @@ ASYMMETRY RULE (most important rule — this is how you make money):
 - The BEST trades: cheap side (0.20-0.50) with concrete evidence it's underpriced.
 
 HARD RULES:
-- Max 3 trades per cycle (enforced in code)
+- Max 1 trade per cycle (enforced in code — pick only the BEST opportunity)
 - NEVER bet YES and NO on the same market
 - NEVER trade without citing specific evidence
 - If prescan data is in the initial message, DO NOT re-fetch it with tools
@@ -512,6 +524,10 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
     elif name == "detect_opportunities":
         return detect_opportunities(args.get("markets", []))
 
+    elif name == "get_weather_forecast":
+        from tools.weather import get_weather_forecast
+        return get_weather_forecast(args["city"], args.get("target_date", ""))
+
     elif name == "get_simmer_briefing":
         simmer_key = config.get("simmer_api_key", "")
         if not simmer_key:
@@ -529,9 +545,13 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
             return {"error": str(e)}
 
     elif name == "get_simmer_context":
+        # Simmer API expects probability 0-1, agent sends 0-100
+        my_prob = args["my_probability"]
+        if my_prob > 1:
+            my_prob = my_prob / 100.0
         return get_simmer_context(
             args["market_id"],
-            args["my_probability"],
+            my_prob,
             config.get("simmer_api_key", ""),
         ) or {"skipped": "No Simmer API key configured"}
 
@@ -768,10 +788,14 @@ class PolybotAgent:
         if whale_signals:
             reasons.append(f"whale_signals:{len(whale_signals)}")
 
-        # SIM venue: always invoke LLM if there are any markets (operate more)
-        if self.config.get("venue", "sim") == "sim" and markets and not (len(markets) == 1 and "error" in markets[0]):
-            if not reasons:
-                reasons.append("sim_venue_active")
+        # SIM venue: invoke if there are tier1/weather markets even without other signals
+        if self.config.get("venue", "sim") == "sim" and not reasons:
+            tier1_available = any(
+                m.get("tier", "").startswith("tier1") for m in markets
+                if isinstance(m, dict) and "error" not in m
+            ) if markets else False
+            if tier1_available:
+                reasons.append("sim_tier1_available")
 
         invoke = len(reasons) > 0
         if not invoke:
@@ -815,6 +839,23 @@ class PolybotAgent:
                 won = pnl > 0
                 title = prev_pos.get("title", "unknown")
                 side = prev_pos.get("side", "unknown")
+
+                # Infer category from title for performance tracking
+                title_lower = title.lower()
+                if any(kw in title_lower for kw in ["temperature", "°c", "°f", "weather"]):
+                    category = "weather"
+                elif any(kw in title_lower for kw in ["election", "president", "congress", "vote", "poll"]):
+                    category = "politics"
+                elif any(kw in title_lower for kw in ["gdp", "fed", "rate", "inflation"]):
+                    category = "economy"
+                elif any(kw in title_lower for kw in ["champion", "playoff", "nba", "nfl", "mlb", "premier"]):
+                    category = "sports-major"
+                elif any(kw in title_lower for kw in [" vs ", "winner", "spread"]):
+                    category = "sports-match"
+                elif any(kw in title_lower for kw in ["btc", "bitcoin", "eth", "crypto", "fdv"]):
+                    category = "crypto"
+                else:
+                    category = "other"
                 amount = round(prev_pos.get("size", 0) * prev_pos.get("avg_price", 0), 2)
 
                 save_trade_result(
@@ -824,7 +865,7 @@ class PolybotAgent:
                     amount_usdc=amount,
                     pnl=round(pnl, 4),
                     reason="auto-detected resolution",
-                    category="unknown",
+                    category=category,
                     resolved=True,
                 )
 

@@ -314,14 +314,10 @@ def get_markets(
             elif isinstance(outcome_prices, list) and outcome_prices:
                 yes_prob = float(outcome_prices[0]) * 100
 
-            # Skip near-resolved markets unless resolving within 3 days
-            if max(yes_prob, 100 - yes_prob) > 95 and days_to_res > 3:
-                continue
-
             if not (min_probability <= yes_prob <= max_probability):
                 continue
 
-            # Days to resolution
+            # Days to resolution (must come before near-resolution check)
             end_date_str = m.get("endDate") or m.get("end_date_iso", "")
             days_to_res = 999
             if end_date_str:
@@ -333,6 +329,10 @@ def get_markets(
 
             # Skip markets > 30 days out
             if days_to_res > 30:
+                continue
+
+            # Skip near-resolved markets unless resolving within 3 days
+            if max(yes_prob, 100 - yes_prob) > 95 and days_to_res > 3:
                 continue
 
             filtered.append({
