@@ -173,19 +173,19 @@ def get_markets(
                     "relegation", "promotion", "seed",
                 ]
 
-                # --- TIER 3: Low edge (individual match outcomes, spreads) ---
-                # These are the "vs", "winner", "spread", "o/u" markets
+                # --- TIER 3: Medium-low edge (match outcomes with context) ---
                 tier3_kw = [
-                    " vs ", " vs. ", "winner", "spread", "o/u", "over/under",
-                    "map 2", "map 3", "set 1", "set 2", "first half",
-                    "points o/u",
+                    "spread", "o/u", "over/under", "points o/u",
                 ]
 
-                # --- NOISE: No edge (temperature, exact price, random) ---
+                # --- NOISE: No edge (temperature, exact price, crypto FDV, esports maps) ---
                 noise_kw = [
                     "temperature", "highest temp", "lowest temp", "°c", "°f",
                     "exact price", "close above", "close below",
                     "will reach", "will hit",
+                    "fdv above", "fdv below", "market cap above",
+                    "map 2 winner", "map 3 winner", "map 1 winner",
+                    "set 1 winner", "set 2 winner", "set 3 winner",
                 ]
 
                 # Determine tier and score
@@ -202,8 +202,10 @@ def get_markets(
                     tier = "tier3"
                     quick_score = 0.3 + abs(yes_prob - 50) / 50
                 else:
+                    # Unknown markets: only include if probability is very skewed (>75% or <25%)
                     tier = "other"
-                    quick_score = 0.5 + abs(yes_prob - 50) / 50
+                    skew = abs(yes_prob - 50)
+                    quick_score = (skew / 50) - 0.5 if skew > 25 else -1.0
 
                 # Near-resolution bonus (applies to all tiers)
                 if days_to_res <= 3:
@@ -629,19 +631,34 @@ def place_order(
     if side not in ("YES", "NO"):
         return {"error": f"Invalid side: {side}. Must be YES or NO.", "executed": False}
 
-    # Check for conflicting position (don't bet YES and NO on same market)
+    # --- Breakeven gate + max entry price (Polymarket only, SIM is unrestricted) ---
+    if venue != "sim":
+        detail_for_check = get_market_detail(market_id, venue=venue, simmer_api_key=simmer_api_key)
+        if "error" not in detail_for_check:
+            entry_price = detail_for_check.get("yes_price", 0.5) if side == "YES" else detail_for_check.get("no_price", 0.5)
+            max_entry = 0.75
+            if entry_price > max_entry:
+                return {
+                    "error": f"Entry price {entry_price:.2f} too high. Max: {max_entry}. "
+                             f"Need {entry_price:.0%} WR to break even — seek cheaper side.",
+                    "executed": False,
+                }
+
+    # Block duplicate and conflicting positions
     positions = get_positions(wallet_address, venue=venue, simmer_api_key=simmer_api_key)
     for pos in positions:
         if isinstance(pos, dict) and pos.get("market_id") == market_id:
             existing_side = pos.get("side", "").upper()
             if existing_side and existing_side != side:
                 return {
-                    "error": f"Conflicting position: already have {existing_side} on this market. Cannot bet {side}.",
+                    "error": f"Conflicting: already have {existing_side}. Cannot bet {side}.",
                     "executed": False,
                 }
             if existing_side == side:
-                # Same side = adding to position, allow it
-                break
+                return {
+                    "error": f"Already have {existing_side} position in this market. No stacking.",
+                    "executed": False,
+                }
 
     # --- Spread check (Polymarket only — SIM has no real spread) ---
     if venue != "sim":

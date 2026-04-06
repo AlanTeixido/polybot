@@ -344,12 +344,19 @@ POSITION SIZING (adaptive, based on edge):
 - Whale confirmation (2+ wallets): multiply by 1.3x
 - NEVER exceed max_bet_usdc or 20% of balance
 
+ASYMMETRY RULE (most important rule — this is how you make money):
+- Buying at $0.80 means risking $0.80 to gain $0.20. You need 80%+ win rate to break even.
+- Buying at $0.30 means risking $0.30 to gain $0.70. You only need 30% win rate.
+- ALWAYS prefer the cheap side of a market. If YES is 0.85, look at NO (0.15) instead.
+- Code blocks entries above $0.75. Work within this — find markets where the cheap side has evidence.
+- The BEST trades: cheap side (0.20-0.50) with concrete evidence it's underpriced.
+
 HARD RULES:
 - Max 3 trades per cycle (enforced in code)
 - NEVER bet YES and NO on the same market
 - NEVER trade without citing specific evidence
 - If prescan data is in the initial message, DO NOT re-fetch it with tools
-- Markets you already have a position in: skip unless adding to same side
+- Markets you already have a position in: blocked by code (no stacking)
 
 WHALE TRACKING:
 Whale wallets are top Polymarket traders by profit (millions in verified gains).
@@ -624,12 +631,30 @@ def check_risk_limits(config: dict, cached_balance: float = -1) -> dict[str, Any
             alerts.append(drawdown_msg)
             logger.warning(drawdown_msg)
 
+    # --- Daily loss limit (circuit breaker) ---
+    # If lost more than daily_loss_limit today, pause until tomorrow
+    daily_limit = config.get("daily_loss_limit", 500)
+    today_str = time.strftime("%Y-%m-%d")
+    from tools.memory import _load_json, TRADES_FILE
+    all_trades = _load_json(TRADES_FILE)
+    today_pnl = sum(
+        t.get("pnl", 0) for t in all_trades
+        if t.get("resolved") and t.get("date", "").startswith(today_str)
+    )
+    if today_pnl < -daily_limit:
+        msg = f"Daily loss limit hit: {today_pnl:.0f} (limit: -{daily_limit}). Pausing."
+        alerts.append(msg)
+        if venue != "sim":
+            should_stop = True
+        logger.warning(msg)
+
     return {
         "streak": streak,
         "alerts": alerts,
         "should_stop": should_stop,
         "stats": stats,
         "balance_usdc": balance_usdc,
+        "today_pnl": round(today_pnl, 2),
     }
 
 

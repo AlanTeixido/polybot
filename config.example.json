@@ -10,8 +10,8 @@
   "max_bet_usdc": 50,
   "min_volume": 0,
   "max_positions": 20,
-  "cycle_interval_seconds": 60,
-  "near_resolution_interval_seconds": 15,
+  "cycle_interval_seconds": 180,
+  "near_resolution_interval_seconds": 60,
   "telegram_bot_token": "",
   "telegram_chat_id": "",
   "whale_wallets": [
@@ -29,5 +29,6 @@
   "news_api_key": "",
   "simmer_api_key": "",
   "polygon_rpc": "",
-  "max_spread_tolerance": 0.05
+  "max_spread_tolerance": 0.05,
+  "daily_loss_limit": 500
 }
