@@ -109,26 +109,93 @@ def _get_nws_grid(lat: float, lon: float) -> dict | None:
         return None
 
 
-def get_weather_forecast(city: str, target_date: str = "") -> dict[str, Any]:
-    """Get weather forecast for a city. Returns high/low temps and conditions.
+def _estimate_probability(forecast_temp: float, threshold: float, comparison: str = "above") -> float:
+    """Estimate probability that actual temp will be above/below/equal to threshold.
+
+    Uses a normal distribution around the forecast with std_dev based on
+    typical forecast error (~2°C for 1-3 day forecasts, ~3.5°C for 4-7 day).
+    This converts a point forecast into a probability — the key edge for weather markets.
+    """
+    import math
+
+    # Typical forecast error (standard deviation in °C)
+    # NWS/GFS accuracy: ~1.5-2°C for day 1-2, ~2.5-3.5°C for day 3-7
+    std_dev = 2.5  # Conservative middle estimate
+
+    if std_dev == 0:
+        return 1.0 if forecast_temp >= threshold else 0.0
+
+    # Z-score: how many std devs the threshold is from forecast
+    z = (threshold - forecast_temp) / std_dev
+
+    # CDF using error function (no scipy needed)
+    prob_below_threshold = 0.5 * (1 + math.erf(z / math.sqrt(2)))
+    prob_above_threshold = 1 - prob_below_threshold
+
+    if comparison == "above":
+        return round(prob_above_threshold, 3)
+    elif comparison == "below":
+        return round(prob_below_threshold, 3)
+    elif comparison == "equal":
+        # P(temp == X) ≈ P(X-0.5 < temp < X+0.5)
+        p_low = 0.5 * (1 + math.erf((threshold - 0.5 - forecast_temp) / (std_dev * math.sqrt(2))))
+        p_high = 0.5 * (1 + math.erf((threshold + 0.5 - forecast_temp) / (std_dev * math.sqrt(2))))
+        return round(p_high - p_low, 3)
+    else:
+        return round(prob_above_threshold, 3)
+
+
+def get_weather_forecast(
+    city: str, target_date: str = "", threshold_c: float | None = None, comparison: str = "above"
+) -> dict[str, Any]:
+    """Get weather forecast and optionally calculate probability vs a threshold.
 
     Args:
-        city: City name (e.g. "Atlanta", "New York")
-        target_date: Optional date string (e.g. "2026-04-05"). If empty, returns next 7 days.
+        city: City name (e.g. "Atlanta", "Shanghai")
+        target_date: Date to forecast (YYYY-MM-DD). Optional.
+        threshold_c: Temperature threshold in °C. If provided, calculates probability.
+        comparison: "above", "below", or "equal" (for exact temp markets)
+
+    Returns dict with:
+        - forecasts: list of {date, high_c, low_c, high_f, low_f, source}
+        - probability: P(temp [comparison] threshold) if threshold_c provided
+        - edge_info: {forecast_high_c, threshold_c, probability, comparison}
     """
     coords = _find_city_coords(city)
     if not coords:
-        return {"error": f"City '{city}' not found in database. Available: {', '.join(sorted(CITY_COORDS.keys())[:10])}..."}
+        available = ', '.join(sorted(CITY_COORDS.keys())[:15])
+        return {"error": f"City '{city}' not found. Available: {available}..."}
 
     lat, lon = coords
-    is_us = -130 < lon < -60 and 24 < lat < 50  # Rough US bounds
+    is_us = -130 < lon < -60 and 24 < lat < 50
 
-    # NWS only works for US locations
     if is_us:
-        return _get_nws_forecast(lat, lon, city, target_date)
+        result = _get_nws_forecast(lat, lon, city, target_date)
     else:
-        # For non-US, use Open-Meteo (free, no key)
-        return _get_open_meteo_forecast(lat, lon, city, target_date)
+        result = _get_open_meteo_forecast(lat, lon, city, target_date)
+
+    if "error" in result:
+        return result
+
+    # Calculate probability if threshold provided
+    if threshold_c is not None and result.get("forecasts"):
+        # Use daytime high temp as the reference
+        highs = [f.get("high_c") or f.get("temperature_c") for f in result["forecasts"]
+                 if (f.get("high_c") or f.get("temperature_c")) is not None
+                 and f.get("is_daytime", True)]
+        if highs:
+            forecast_high = highs[0]  # Best available forecast
+            prob = _estimate_probability(forecast_high, threshold_c, comparison)
+            result["probability"] = prob
+            result["edge_info"] = {
+                "forecast_high_c": forecast_high,
+                "threshold_c": threshold_c,
+                "comparison": comparison,
+                "probability": prob,
+                "confidence": "high" if abs(forecast_high - threshold_c) > 5 else "medium" if abs(forecast_high - threshold_c) > 2 else "low",
+            }
+
+    return result
 
 
 def _get_nws_forecast(lat: float, lon: float, city: str, target_date: str) -> dict[str, Any]:
@@ -146,28 +213,32 @@ def _get_nws_forecast(lat: float, lon: float, city: str, target_date: str) -> di
         if not periods:
             return {"error": "No forecast periods", "city": city}
 
-        forecasts = []
-        for p in periods[:14]:  # 7 days (day + night)
-            forecasts.append({
-                "name": p.get("name", ""),
-                "date": p.get("startTime", "")[:10],
-                "temperature_f": p.get("temperature"),
-                "temperature_c": round((p.get("temperature", 32) - 32) * 5 / 9, 1),
-                "wind_speed": p.get("windSpeed", ""),
-                "short_forecast": p.get("shortForecast", ""),
-                "is_daytime": p.get("isDaytime", True),
-            })
+        # Group by date: daytime = high, nighttime = low
+        by_date: dict[str, dict] = {}
+        for p in periods[:14]:
+            date = p.get("startTime", "")[:10]
+            if not date:
+                continue
+            if date not in by_date:
+                by_date[date] = {"date": date, "high_c": None, "low_c": None, "high_f": None, "low_f": None, "forecast": "", "is_daytime": True}
+            temp_f = p.get("temperature", 32)
+            temp_c = round((temp_f - 32) * 5 / 9, 1)
+            if p.get("isDaytime", True):
+                by_date[date]["high_f"] = temp_f
+                by_date[date]["high_c"] = temp_c
+                by_date[date]["forecast"] = p.get("shortForecast", "")
+            else:
+                by_date[date]["low_f"] = temp_f
+                by_date[date]["low_c"] = temp_c
 
-        # Filter to target date if specified
+        forecasts = list(by_date.values())
         if target_date:
             forecasts = [f for f in forecasts if f["date"] == target_date]
 
         return {
             "city": city,
-            "source": "NWS (api.weather.gov)",
+            "source": "NWS",
             "forecasts": forecasts,
-            "high_temps_c": [f["temperature_c"] for f in forecasts if f["is_daytime"]],
-            "low_temps_c": [f["temperature_c"] for f in forecasts if not f["is_daytime"]],
         }
 
     except Exception as e:
@@ -201,24 +272,25 @@ def _get_open_meteo_forecast(lat: float, lon: float, city: str, target_date: str
 
         forecasts = []
         for i, date in enumerate(dates):
-            f = {
+            high_c = highs[i] if i < len(highs) else None
+            low_c = lows[i] if i < len(lows) else None
+            forecasts.append({
                 "date": date,
-                "high_c": highs[i] if i < len(highs) else None,
-                "low_c": lows[i] if i < len(lows) else None,
-                "high_f": round(highs[i] * 9 / 5 + 32, 1) if i < len(highs) and highs[i] is not None else None,
-                "precip_probability": precip_prob[i] if i < len(precip_prob) else None,
-            }
-            forecasts.append(f)
+                "high_c": high_c,
+                "low_c": low_c,
+                "high_f": round(high_c * 9 / 5 + 32, 1) if high_c is not None else None,
+                "low_f": round(low_c * 9 / 5 + 32, 1) if low_c is not None else None,
+                "forecast": "",
+                "is_daytime": True,
+            })
 
-        # Filter to target date if specified
         if target_date:
             forecasts = [f for f in forecasts if f["date"] == target_date]
 
         return {
             "city": city,
-            "source": "Open-Meteo (open-meteo.com)",
+            "source": "Open-Meteo",
             "forecasts": forecasts,
-            "high_temps_c": [f["high_c"] for f in forecasts if f["high_c"] is not None],
         }
 
     except Exception as e:

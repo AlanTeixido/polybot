@@ -298,12 +298,14 @@ TOOLS = [
     },
     {
         "name": "get_weather_forecast",
-        "description": "Get actual weather forecast for a city from NWS (US) or Open-Meteo (global). Returns high/low temps in °C and °F. Use this for weather markets — compare forecast vs market price for edge.",
+        "description": "Get weather forecast + probability calculation. For weather markets like 'Will temp be above 23°C?', pass threshold_c=23 and comparison='above' to get P(event). Returns probability you can compare directly against market price for edge.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "city": {"type": "string", "description": "City name (e.g. 'Atlanta', 'Shanghai', 'Istanbul')"},
-                "target_date": {"type": "string", "description": "Date to forecast (YYYY-MM-DD). Optional — omit for next 7 days."},
+                "city": {"type": "string", "description": "City name (e.g. 'Atlanta', 'Shanghai')"},
+                "target_date": {"type": "string", "description": "Date (YYYY-MM-DD). Optional."},
+                "threshold_c": {"type": "number", "description": "Temperature threshold in °C from the market question"},
+                "comparison": {"type": "string", "description": "'above', 'below', or 'equal'. Default: 'above'"},
             },
             "required": ["city"],
         },
@@ -526,7 +528,12 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
 
     elif name == "get_weather_forecast":
         from tools.weather import get_weather_forecast
-        return get_weather_forecast(args["city"], args.get("target_date", ""))
+        return get_weather_forecast(
+            args["city"],
+            args.get("target_date", ""),
+            threshold_c=args.get("threshold_c"),
+            comparison=args.get("comparison", "above"),
+        )
 
     elif name == "get_simmer_briefing":
         simmer_key = config.get("simmer_api_key", "")
