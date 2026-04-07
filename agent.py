@@ -795,14 +795,14 @@ class PolybotAgent:
         if whale_signals:
             reasons.append(f"whale_signals:{len(whale_signals)}")
 
-        # SIM venue: invoke if there are tier1/weather markets even without other signals
+        # SIM venue: invoke if there are any scored markets (tier1, tier2, or tier3)
         if self.config.get("venue", "sim") == "sim" and not reasons:
-            tier1_available = any(
-                m.get("tier", "").startswith("tier1") for m in markets
+            tradeable = any(
+                m.get("quick_score", 0) > 0 for m in markets
                 if isinstance(m, dict) and "error" not in m
             ) if markets else False
-            if tier1_available:
-                reasons.append("sim_tier1_available")
+            if tradeable:
+                reasons.append("sim_markets_available")
 
         invoke = len(reasons) > 0
         if not invoke:
