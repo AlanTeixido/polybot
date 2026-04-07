@@ -1037,7 +1037,43 @@ class PolybotAgent:
             p for p in current_pos if isinstance(p, dict) and "error" not in p
         ]
 
+        # Save balance snapshot for dashboard chart
+        self._save_balance_snapshot()
+
         logger.info(f"=== CYCLE {self.cycle_count} END (turns: {turn + 1}) ===")
+
+    def _save_balance_snapshot(self) -> None:
+        """Save a balance snapshot for the dashboard chart."""
+        try:
+            balance_info = self.get_cached_balance()
+            if not balance_info:
+                return
+            bal = balance_info.get("balance_usdc", 0)
+            if bal <= 0:
+                return
+
+            history_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "memory", "balance_history.json"
+            )
+            history = []
+            if os.path.exists(history_path):
+                with open(history_path, "r") as f:
+                    history = json.load(f)
+
+            history.append({
+                "timestamp": time.time(),
+                "balance": round(bal, 2),
+                "date": time.strftime("%Y-%m-%d %H:%M:%S"),
+            })
+
+            # Keep last 2000 snapshots (~3 days at 3min cycles)
+            if len(history) > 2000:
+                history = history[-2000:]
+
+            with open(history_path, "w") as f:
+                json.dump(history, f, indent=2)
+        except Exception as e:
+            logger.debug(f"Balance snapshot failed: {e}")
 
     def get_cycle_interval(self) -> int:
         """Return cycle interval, faster if near-resolution opportunities exist."""
