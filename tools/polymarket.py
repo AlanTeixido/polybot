@@ -220,10 +220,14 @@ def get_markets(
                     tier = "tier3"
                     quick_score = 0.3 + abs(yes_prob - 50) / 50
                 else:
-                    # Unknown markets: only include if probability is very skewed (>75% or <25%)
                     tier = "other"
-                    skew = abs(yes_prob - 50)
-                    quick_score = (skew / 50) - 0.5 if skew > 25 else -1.0
+                    if venue == "sim":
+                        # SIM: let everything through, LLM decides
+                        quick_score = 0.1 + abs(yes_prob - 50) / 50
+                    else:
+                        # Polymarket: only include if probability is very skewed (>75% or <25%)
+                        skew = abs(yes_prob - 50)
+                        quick_score = (skew / 50) - 0.5 if skew > 25 else -1.0
 
                 # Near-resolution bonus (applies to all tiers)
                 if days_to_res <= 3:

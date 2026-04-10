@@ -717,7 +717,7 @@ class PolybotAgent:
         self.previous_positions: list[dict] = []
         self.previous_market_ids: set[str] = set()
         self._trades_this_cycle: int = 0
-        self._max_trades_per_cycle: int = 1
+        self._max_trades_per_cycle: int = 2
         # Balance cache (avoid double RPC calls per cycle)
         self._cached_balance: float = -1
         self._balance_cache_ts: float = 0
