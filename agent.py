@@ -490,12 +490,13 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
         return get_performance_by_category()
 
     elif name == "place_order":
-        # Hard limit: max 3 trades per cycle (enforced in code, not just prompt)
+        # Hard limit per cycle (only for real venue, SIM is unlimited)
         trades_this_cycle = config.get("_trades_this_cycle", 0)
-        max_trades = config.get("_max_trades_per_cycle", 3)
-        if trades_this_cycle >= max_trades:
+        max_trades = config.get("_max_trades_per_cycle", 999)
+        venue_check = config.get("venue", "sim")
+        if venue_check != "sim" and trades_this_cycle >= max_trades:
             return {
-                "error": f"Trade limit reached: {trades_this_cycle}/{max_trades} trades this cycle. Wait for next cycle.",
+                "error": f"Trade limit reached: {trades_this_cycle}/{max_trades} trades this cycle.",
                 "executed": False,
             }
 
