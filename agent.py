@@ -717,6 +717,9 @@ class PolybotAgent:
         self.previous_market_ids: set[str] = set()
         self._trades_this_cycle: int = 0
         self._max_trades_per_cycle: int = 2
+        # IDs of positions that existed at startup — never mark these as resolved
+        self._startup_position_ids: set[str] = set()
+        self._startup_captured: bool = False
         # Balance cache (avoid double RPC calls per cycle)
         self._cached_balance: float = -1
         self._balance_cache_ts: float = 0
@@ -761,6 +764,20 @@ class PolybotAgent:
             venue=self.config.get("venue", "sim"),
             simmer_api_key=self.config.get("simmer_api_key", ""),
         )
+
+        # Debug: log what we got from the API
+        if markets:
+            scored = [m for m in markets if isinstance(m, dict) and m.get("quick_score", 0) > 0]
+            errors = [m for m in markets if isinstance(m, dict) and "error" in m]
+            if errors:
+                logger.warning(f"Prescan: market fetch errors: {errors[0].get('error', '?')}")
+            logger.info(f"Prescan: {len(markets)} markets fetched, {len(scored)} with score>0")
+            if scored:
+                top = scored[0]
+                logger.info(f"Prescan: top market: {top.get('title', '?')[:60]} | tier={top.get('tier', '?')} score={top.get('quick_score', 0)}")
+        else:
+            logger.warning("Prescan: get_markets returned empty/None")
+
         if markets and not (len(markets) == 1 and "error" in markets[0]):
             current_ids = {m["id"] for m in markets if "id" in m}
 
@@ -794,13 +811,13 @@ class PolybotAgent:
         if whale_signals:
             reasons.append(f"whale_signals:{len(whale_signals)}")
 
-        # SIM venue: invoke if there are any scored markets (tier1, tier2, or tier3)
+        # SIM venue: invoke if there are ANY markets at all (we want to trade in SIM)
         if self.config.get("venue", "sim") == "sim" and not reasons:
-            tradeable = any(
-                m.get("quick_score", 0) > 0 for m in markets
-                if isinstance(m, dict) and "error" not in m
-            ) if markets else False
-            if tradeable:
+            has_markets = any(
+                isinstance(m, dict) and "error" not in m and m.get("id")
+                for m in (markets or [])
+            )
+            if has_markets:
                 reasons.append("sim_markets_available")
 
         invoke = len(reasons) > 0
@@ -821,8 +838,17 @@ class PolybotAgent:
 
     def _detect_resolved_trades(self) -> None:
         """Compare previous vs current positions to detect resolved trades."""
-        # Skip first 3 cycles after startup to avoid phantom resolutions
-        if not self.previous_positions or self.cycle_count <= 3:
+        if not self.previous_positions:
+            return
+
+        # Capture startup positions on first call — these existed before bot started
+        if not self._startup_captured:
+            self._startup_position_ids = {
+                p.get("market_id") for p in self.previous_positions
+                if isinstance(p, dict) and p.get("market_id")
+            }
+            self._startup_captured = True
+            logger.info(f"Captured {len(self._startup_position_ids)} startup positions (will ignore resolutions)")
             return
 
         from tools.polymarket import get_positions
@@ -840,7 +866,11 @@ class PolybotAgent:
         }
 
         for prev_pos in self.previous_positions:
-            if prev_pos.get("market_id") not in current_ids:
+            market_id = prev_pos.get("market_id", "")
+            # Skip positions that existed at startup — we didn't open these
+            if market_id in self._startup_position_ids:
+                continue
+            if market_id not in current_ids:
                 # Position disappeared = resolved
                 pnl = prev_pos.get("unrealized_pnl", 0)
                 won = pnl > 0
