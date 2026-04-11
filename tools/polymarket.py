@@ -119,24 +119,15 @@ def get_markets(
     # --- Simmer venue ---
     if venue == "sim" and simmer_api_key:
         try:
-            # Try /opportunities first (ranked by edge+liquidity+urgency)
             resp = SESSION.get(
-                f"{SIMMER_API}/markets/opportunities",
+                f"{SIMMER_API}/markets",
                 params={"limit": 50},
                 headers={"Authorization": f"Bearer {simmer_api_key}"},
                 timeout=REQUEST_TIMEOUT,
             )
-            if resp.status_code != 200:
-                # Fallback to /markets
-                resp = SESSION.get(
-                    f"{SIMMER_API}/markets",
-                    params={"limit": 50},
-                    headers={"Authorization": f"Bearer {simmer_api_key}"},
-                    timeout=REQUEST_TIMEOUT,
-                )
             resp.raise_for_status()
             data = resp.json()
-            markets = data if isinstance(data, list) else data.get("data", data.get("markets", []))
+            markets = data.get("markets", []) if isinstance(data, dict) else data
 
             now = datetime.now(timezone.utc)
             result = []
