@@ -696,7 +696,6 @@ def check_risk_limits(config: dict, cached_balance: float = -1) -> dict[str, Any
         "should_stop": should_stop,
         "stats": stats,
         "balance_usdc": balance_usdc,
-        "today_pnl": round(today_pnl, 2),
     }
 
 
