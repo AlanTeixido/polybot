@@ -674,22 +674,21 @@ def check_risk_limits(config: dict, cached_balance: float = -1) -> dict[str, Any
             alerts.append(drawdown_msg)
             logger.warning(drawdown_msg)
 
-    # --- Daily loss limit (circuit breaker) ---
-    # If lost more than daily_loss_limit today, pause until tomorrow
-    daily_limit = config.get("daily_loss_limit", 500)
-    today_str = time.strftime("%Y-%m-%d")
-    from tools.memory import _load_json, TRADES_FILE
-    all_trades = _load_json(TRADES_FILE)
-    today_pnl = sum(
-        t.get("pnl", 0) for t in all_trades
-        if t.get("resolved") and t.get("date", "").startswith(today_str)
-    )
-    if today_pnl < -daily_limit:
-        msg = f"Daily loss limit hit: {today_pnl:.0f} (limit: -{daily_limit}). Pausing."
-        alerts.append(msg)
-        if venue != "sim":
+    # --- Daily loss limit (circuit breaker, real venue only) ---
+    if venue != "sim":
+        daily_limit = config.get("daily_loss_limit", 500)
+        today_str = time.strftime("%Y-%m-%d")
+        from tools.memory import _load_json, TRADES_FILE
+        all_trades = _load_json(TRADES_FILE)
+        today_pnl = sum(
+            t.get("pnl", 0) for t in all_trades
+            if t.get("resolved") and t.get("date", "").startswith(today_str)
+        )
+        if today_pnl < -daily_limit:
+            msg = f"Daily loss limit hit: {today_pnl:.0f} (limit: -{daily_limit}). Pausing."
+            alerts.append(msg)
             should_stop = True
-        logger.warning(msg)
+            logger.warning(msg)
 
     return {
         "streak": streak,
@@ -823,7 +822,8 @@ class PolybotAgent:
 
     def _detect_resolved_trades(self) -> None:
         """Compare previous vs current positions to detect resolved trades."""
-        if not self.previous_positions:
+        # Skip first 3 cycles after startup to avoid phantom resolutions
+        if not self.previous_positions or self.cycle_count <= 3:
             return
 
         from tools.polymarket import get_positions
