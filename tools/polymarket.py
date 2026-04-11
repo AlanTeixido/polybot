@@ -141,14 +141,14 @@ def get_markets(
             now = datetime.now(timezone.utc)
             result = []
             for m in markets:
-                # Parse probability (Simmer returns float 0-1)
-                prob_raw = m.get("probability", m.get("yes_probability", 0.5))
+                # Parse probability (Simmer uses current_probability, float 0-1)
+                prob_raw = m.get("current_probability", m.get("current_price", m.get("probability", 0.5)))
                 if isinstance(prob_raw, str):
                     prob_raw = float(prob_raw)
                 yes_prob = round(prob_raw * 100 if prob_raw <= 1 else prob_raw, 1)
 
-                # Parse days to resolution
-                end_date_str = m.get("endDate", m.get("end_date", ""))
+                # Parse days to resolution (Simmer uses resolves_at)
+                end_date_str = m.get("resolves_at", m.get("endDate", m.get("end_date", "")))
                 days_to_res = 30
                 if end_date_str:
                     try:
@@ -159,7 +159,11 @@ def get_markets(
 
                 # Classify market by researchability
                 title_lower = (m.get("question", m.get("title", "")) or "").lower()
+                # Simmer uses tags array instead of category string
+                tags = m.get("tags", [])
                 cat_lower = (m.get("category", "") or "").lower()
+                if not cat_lower and tags:
+                    cat_lower = " ".join(tags).lower()
 
                 # --- TIER 1: High edge (verifiable with data/news) ---
                 tier1_kw = [
@@ -236,15 +240,15 @@ def get_markets(
                     quick_score += 0.3
 
                 result.append({
-                    "id": m.get("id", m.get("market_id", "")),
+                    "id": m.get("id", ""),
                     "title": m.get("question", m.get("title", "")),
                     "yes_probability": yes_prob,
                     "volume": "sim",
                     "liquidity": "sim",
                     "end_date": end_date_str,
                     "days_to_resolution": round(days_to_res, 1),
-                    "category": m.get("category", "unknown"),
-                    "condition_id": m.get("conditionId", m.get("condition_id", "")),
+                    "category": ", ".join(tags[:3]) if tags else "unknown",
+                    "condition_id": m.get("polymarket_token_id", ""),
                     "quick_score": round(quick_score, 3),
                     "tier": tier,
                     "venue": "sim",
