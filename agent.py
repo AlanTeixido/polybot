@@ -969,8 +969,8 @@ class PolybotAgent:
             cycle_msg += f"\nNear-resolution ({len(nr)}):\n"
             for m in nr[:5]:
                 cycle_msg += (
-                    f"  - {m['title']} | prob: {m['yes_probability']}% | "
-                    f"days: {m['days_to_resolution']} | vol: {m['volume']}\n"
+                    f"  - ID: {m['id']} | {m['title']} | prob: {m['yes_probability']}% | "
+                    f"days: {m['days_to_resolution']} | tier: {m.get('tier', '?')}\n"
                 )
 
         if scan.get("whale_signals"):
@@ -985,7 +985,7 @@ class PolybotAgent:
         if scan.get("new_markets"):
             cycle_msg += f"\nNew markets: {', '.join(scan['new_markets'][:5])}\n"
 
-        cycle_msg += "\nAnaliza las oportunidades y ejecuta los mejores trades."
+        cycle_msg += "\nIMPORTANT: Use the market ID (UUID) for tool calls, NOT the title. The ID looks like 'abc123-def456-...'.\nAnaliza las oportunidades y ejecuta los mejores trades."
 
         if risk["stats"].get("resolved_trades", 0) > 0:
             s = risk["stats"]
