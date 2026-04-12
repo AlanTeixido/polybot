@@ -924,8 +924,10 @@ class PolybotAgent:
         self.config["_max_trades_per_cycle"] = self._max_trades_per_cycle
         logger.info(f"=== CYCLE {self.cycle_count} START ===")
 
-        # Detect resolved trades by comparing with previous cycle positions
-        self._detect_resolved_trades()
+        # NOTE: _detect_resolved_trades disabled — was generating phantom losses
+        # from old Simmer positions on every restart. Will re-enable when we have
+        # a reliable resolution detection mechanism.
+        # self._detect_resolved_trades()
 
         # Pre-cycle risk check (uses cached balance)
         risk = check_risk_limits(self.config, cached_balance=self.get_cached_balance())
