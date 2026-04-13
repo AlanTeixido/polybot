@@ -402,7 +402,7 @@ def place_order(
 # ---------------------------------------------------------------------------
 # Trading logic
 # ---------------------------------------------------------------------------
-def evaluate_market(market: dict, min_edge: float) -> dict | None:
+def evaluate_market(market: dict, min_edge: float, verbose: bool = False) -> dict | None:
     """Evaluate a single weather market. Returns trade decision or None."""
     title = market.get("question", "")
     market_id = market.get("id", "")
@@ -410,24 +410,33 @@ def evaluate_market(market: dict, min_edge: float) -> dict | None:
 
     parsed = parse_weather_market(title)
     if not parsed:
+        if verbose:
+            logger.info(f"  SKIP (parse failed): {title[:70]}")
         return None
 
     target_date = parse_target_date(title)
     if not target_date:
+        if verbose:
+            logger.info(f"  SKIP (no date): {title[:70]}")
         return None
 
     forecast_data = get_forecast(parsed["city"])
     if not forecast_data:
+        if verbose:
+            logger.info(f"  SKIP (no forecast): {parsed['city']} | {title[:60]}")
         return None
 
     day_forecast = forecast_data["forecasts"].get(target_date)
     if not day_forecast:
-        logger.debug(f"No forecast for {target_date} in {parsed['city']}")
+        if verbose:
+            logger.info(f"  SKIP (no forecast for {target_date}): {parsed['city']} | {title[:50]}")
         return None
 
     # Pick the right temp based on metric
     temp_c = day_forecast.get("high_c") if parsed["metric"] == "high" else day_forecast.get("low_c")
     if temp_c is None:
+        if verbose:
+            logger.info(f"  SKIP (no temp): {parsed['city']} {target_date}")
         return None
 
     # Calculate days ahead for uncertainty
@@ -449,6 +458,13 @@ def evaluate_market(market: dict, min_edge: float) -> dict | None:
 
     edge = p_yes - current_price
     abs_edge = abs(edge)
+
+    if verbose:
+        logger.info(
+            f"  {parsed['city']} {target_date} {parsed['metric']}: "
+            f"forecast={temp_c:.1f}C threshold={parsed.get('threshold_c', '?')} "
+            f"P_real={p_yes:.2f} market={current_price:.2f} edge={edge:+.2f}"
+        )
 
     if abs_edge < min_edge:
         return None
@@ -529,14 +545,18 @@ class WeatherBot:
 
         # Filter to weather markets
         weather_markets = [m for m in markets if any(kw in (m.get("question", "") or "").lower() for kw in ["temperature", "°c", "°f"])]
-        logger.info(f"Cycle: {len(markets)} markets, {len(weather_markets)} weather")
+
+        # Verbose debug every 10 cycles
+        self._cycle_num = getattr(self, "_cycle_num", 0) + 1
+        verbose = (self._cycle_num % 10 == 1)
+        logger.info(f"Cycle {self._cycle_num}: {len(markets)} markets, {len(weather_markets)} weather {'[VERBOSE]' if verbose else ''}")
 
         # Evaluate each
         opportunities = []
         for m in weather_markets:
             if m.get("id") in self.state.get("traded_markets", []):
                 continue  # already traded this market
-            decision = evaluate_market(m, self.min_edge)
+            decision = evaluate_market(m, self.min_edge, verbose=verbose)
             if decision:
                 opportunities.append(decision)
 
