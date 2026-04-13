@@ -339,10 +339,12 @@ PROVEN WINNING STRATEGIES (from top Simmer leaderboard agents):
 
 1. WEATHER TRADING (tier1-weather, 91.5% WR proven):
    - Markets like "Will highest temperature in X be Y°C?"
-   - Use get_news() to search "[city] weather forecast [date]" for NOAA/meteorological data
-   - Compare forecast vs market price. If forecast says 90% chance of >25°C but market is at 60%, BUY.
-   - Weather forecasts 1-3 days out are highly accurate. This is the most reliable edge.
-   - ALWAYS research the actual forecast before trading. Never guess weather.
+   - MANDATORY: Call get_weather_forecast(city, target_date, threshold_c, comparison) BEFORE trading.
+     This returns a REAL probability based on NWS/Open-Meteo forecast data.
+   - NEVER guess based on "seasonal norms" — you don't know global climates. Use the tool.
+   - Cities like Singapore, Jeddah, Lagos, Lucknow have very different climates than you think.
+   - Only trade if the tool returns a probability that differs from market price by >15 points.
+   - If the tool errors or city not found, SKIP the trade — do not guess.
 
 2. POLITICS/ECONOMY (tier1, use news data):
    - Search for polls, voting records, economic indicators
