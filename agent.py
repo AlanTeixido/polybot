@@ -502,6 +502,32 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
                 "executed": False,
             }
 
+        # WEATHER GATE: weather markets require get_weather_forecast first
+        title = (args.get("market_title", "") or "").lower()
+        weather_keywords = ["temperature", "°c", "°f", "weather", "rain", "snow", "wind",
+                            "highest temp", "lowest temp", "minimum temp", "maximum temp"]
+        is_weather_market = any(kw in title for kw in weather_keywords)
+        if is_weather_market:
+            checked_cities = config.get("_weather_checked_cities", set())
+            if not isinstance(checked_cities, set):
+                checked_cities = set()
+            # Check if any known city from the market title was forecast-checked
+            title_words = title.replace(",", " ").replace("?", " ").split()
+            found_match = False
+            for city in checked_cities:
+                if city and city in title:
+                    found_match = True
+                    break
+            if not found_match:
+                return {
+                    "error": "WEATHER GATE: You must call get_weather_forecast(city, target_date, threshold_c, comparison) "
+                             "BEFORE placing a weather trade. The tool returns the real probability from NWS/Open-Meteo. "
+                             "Never guess weather from 'seasonal norms' — that's what caused previous losses. "
+                             "Call the tool for this market's city, then retry place_order.",
+                    "executed": False,
+                    "gate": "weather_forecast_required",
+                }
+
         result = place_order(
             market_id=args["market_id"],
             market_title=args.get("market_title", ""),
@@ -531,12 +557,21 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
 
     elif name == "get_weather_forecast":
         from tools.weather import get_weather_forecast
-        return get_weather_forecast(
+        result = get_weather_forecast(
             args["city"],
             args.get("target_date", ""),
             threshold_c=args.get("threshold_c"),
             comparison=args.get("comparison", "above"),
         )
+        # Track that a weather forecast was fetched this cycle
+        if "error" not in result and result.get("forecasts"):
+            city_key = args["city"].lower().strip()
+            checked = config.get("_weather_checked_cities", set())
+            if not isinstance(checked, set):
+                checked = set()
+            checked.add(city_key)
+            config["_weather_checked_cities"] = checked
+        return result
 
     elif name == "get_simmer_briefing":
         simmer_key = config.get("simmer_api_key", "")
@@ -924,6 +959,7 @@ class PolybotAgent:
         self._trades_this_cycle = 0
         self.config["_trades_this_cycle"] = 0
         self.config["_max_trades_per_cycle"] = self._max_trades_per_cycle
+        self.config["_weather_checked_cities"] = set()
         logger.info(f"=== CYCLE {self.cycle_count} START ===")
 
         # NOTE: _detect_resolved_trades disabled — was generating phantom losses
