@@ -180,7 +180,11 @@ def _estimate_probability(forecast_temp: float, threshold: float, comparison: st
 
 
 def get_weather_forecast(
-    city: str, target_date: str = "", threshold_c: float | None = None, comparison: str = "above"
+    city: str,
+    target_date: str = "",
+    threshold_c: float | None = None,
+    comparison: str = "above",
+    metric: str = "high",
 ) -> dict[str, Any]:
     """Get weather forecast and optionally calculate probability vs a threshold.
 
@@ -189,11 +193,12 @@ def get_weather_forecast(
         target_date: Date to forecast (YYYY-MM-DD). Optional.
         threshold_c: Temperature threshold in °C. If provided, calculates probability.
         comparison: "above", "below", or "equal" (for exact temp markets)
+        metric: "high" for max temp, "low" for min temp. Use "low" for "minimum temperature" markets.
 
     Returns dict with:
         - forecasts: list of {date, high_c, low_c, high_f, low_f, source}
         - probability: P(temp [comparison] threshold) if threshold_c provided
-        - edge_info: {forecast_high_c, threshold_c, probability, comparison}
+        - edge_info: {forecast_temp_c, threshold_c, metric, probability, comparison}
     """
     coords = _find_city_coords(city)
     if not coords:
@@ -213,20 +218,24 @@ def get_weather_forecast(
 
     # Calculate probability if threshold provided
     if threshold_c is not None and result.get("forecasts"):
-        # Use daytime high temp as the reference
-        highs = [f.get("high_c") or f.get("temperature_c") for f in result["forecasts"]
-                 if (f.get("high_c") or f.get("temperature_c")) is not None
-                 and f.get("is_daytime", True)]
-        if highs:
-            forecast_high = highs[0]  # Best available forecast
-            prob = _estimate_probability(forecast_high, threshold_c, comparison)
+        # Pick the right metric: high (max) or low (min)
+        if metric == "low":
+            temps = [f.get("low_c") for f in result["forecasts"] if f.get("low_c") is not None]
+        else:
+            temps = [f.get("high_c") or f.get("temperature_c") for f in result["forecasts"]
+                     if (f.get("high_c") or f.get("temperature_c")) is not None
+                     and f.get("is_daytime", True)]
+        if temps:
+            forecast_temp = temps[0]
+            prob = _estimate_probability(forecast_temp, threshold_c, comparison)
             result["probability"] = prob
             result["edge_info"] = {
-                "forecast_high_c": forecast_high,
+                "forecast_temp_c": forecast_temp,
                 "threshold_c": threshold_c,
+                "metric": metric,
                 "comparison": comparison,
                 "probability": prob,
-                "confidence": "high" if abs(forecast_high - threshold_c) > 5 else "medium" if abs(forecast_high - threshold_c) > 2 else "low",
+                "confidence": "high" if abs(forecast_temp - threshold_c) > 5 else "medium" if abs(forecast_temp - threshold_c) > 2 else "low",
             }
 
     return result

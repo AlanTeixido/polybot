@@ -298,14 +298,15 @@ TOOLS = [
     },
     {
         "name": "get_weather_forecast",
-        "description": "Get weather forecast + probability calculation. For weather markets like 'Will temp be above 23°C?', pass threshold_c=23 and comparison='above' to get P(event). Returns probability you can compare directly against market price for edge.",
+        "description": "Get weather forecast + probability for weather markets. Pass threshold_c, comparison, and metric. For 'highest/maximum temperature' markets use metric='high'. For 'minimum/lowest temperature' markets use metric='low'. Returns probability to compare vs market price.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "city": {"type": "string", "description": "City name (e.g. 'Atlanta', 'Shanghai')"},
                 "target_date": {"type": "string", "description": "Date (YYYY-MM-DD). Optional."},
-                "threshold_c": {"type": "number", "description": "Temperature threshold in °C from the market question"},
+                "threshold_c": {"type": "number", "description": "Temperature threshold in °C from the market. Convert °F to °C if needed."},
                 "comparison": {"type": "string", "description": "'above', 'below', or 'equal'. Default: 'above'"},
+                "metric": {"type": "string", "description": "'high' for maximum temp markets, 'low' for minimum temp markets. Default: 'high'"},
             },
             "required": ["city"],
         },
@@ -508,22 +509,33 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
                             "highest temp", "lowest temp", "minimum temp", "maximum temp"]
         is_weather_market = any(kw in title for kw in weather_keywords)
         if is_weather_market:
+            # Check if the title mentions any known city
+            from tools.weather import CITY_COORDS
+            city_in_title = None
+            for known_city in CITY_COORDS.keys():
+                if known_city in title:
+                    city_in_title = known_city
+                    break
+
+            # Reject markets without identifiable city (can't verify with forecast)
+            if not city_in_title:
+                return {
+                    "error": "WEATHER GATE: Market has no identifiable city in title. "
+                             "Cannot verify with forecast data. SKIP this market — trade one where the city is clear.",
+                    "executed": False,
+                    "gate": "no_city_in_title",
+                }
+
+            # Check if that city was forecast-checked this cycle
             checked_cities = config.get("_weather_checked_cities", set())
             if not isinstance(checked_cities, set):
                 checked_cities = set()
-            # Check if any known city from the market title was forecast-checked
-            title_words = title.replace(",", " ").replace("?", " ").split()
-            found_match = False
-            for city in checked_cities:
-                if city and city in title:
-                    found_match = True
-                    break
-            if not found_match:
+            if city_in_title not in checked_cities:
                 return {
-                    "error": "WEATHER GATE: You must call get_weather_forecast(city, target_date, threshold_c, comparison) "
-                             "BEFORE placing a weather trade. The tool returns the real probability from NWS/Open-Meteo. "
-                             "Never guess weather from 'seasonal norms' — that's what caused previous losses. "
-                             "Call the tool for this market's city, then retry place_order.",
+                    "error": f"WEATHER GATE: You must call get_weather_forecast(city='{city_in_title}', ...) "
+                             "BEFORE placing this trade. For 'minimum temperature' markets pass metric='low'. "
+                             "For 'highest/maximum temperature' markets pass metric='high'. "
+                             "Never guess — always use the tool.",
                     "executed": False,
                     "gate": "weather_forecast_required",
                 }
@@ -562,6 +574,7 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
             args.get("target_date", ""),
             threshold_c=args.get("threshold_c"),
             comparison=args.get("comparison", "above"),
+            metric=args.get("metric", "high"),
         )
         # Track that a weather forecast was fetched this cycle
         if "error" not in result and result.get("forecasts"):
