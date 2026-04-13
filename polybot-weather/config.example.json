@@ -1,0 +1,11 @@
+{
+  "simmer_api_key": "YOUR_SIMMER_KEY_HERE",
+  "telegram_bot_token": "",
+  "telegram_chat_id": "",
+  "dry_run": false,
+  "min_edge": 0.15,
+  "max_bet": 50,
+  "max_pct_balance": 0.02,
+  "cycle_interval_seconds": 180,
+  "max_trades_per_cycle": 3
+}
