@@ -550,14 +550,14 @@ def compute_bet_size(
     bet = base * scale
 
     if venue == "polymarket":
-        # Polymarket minimums: $1 order AND 5 shares minimum
-        # 5 shares at entry_price = 5 * entry_price USDC needed
-        min_for_5_shares = max(1.0, 5.0 * entry_price)
-        if bet < min_for_5_shares:
-            # Skip if we can't meet minimum without exceeding max_bet
-            if min_for_5_shares > max_bet:
+        # Simmer charges 10% fee BEFORE calculating shares, and price slips on impact.
+        # Target 6 shares (1 buffer above 5 minimum) with fee compensation.
+        # Formula: bet * 0.9 / entry_price >= 6  →  bet >= 6 * entry_price / 0.9
+        min_bet_for_shares = max(1.0, (6.0 * entry_price) / 0.9)
+        if bet < min_bet_for_shares:
+            if min_bet_for_shares > max_bet:
                 return 0
-            bet = min_for_5_shares
+            bet = min_bet_for_shares
 
     return round(bet, 2)
 
