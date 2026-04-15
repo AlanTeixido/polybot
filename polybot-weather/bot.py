@@ -495,6 +495,8 @@ def evaluate_market(market: dict, min_edge: float, verbose: bool = False) -> dic
         return None
 
     side = "yes" if edge > 0 else "no"
+    # Entry price is the side we're buying
+    entry_price = current_price if side == "yes" else (1 - current_price)
 
     return {
         "market_id": market_id,
@@ -508,21 +510,46 @@ def evaluate_market(market: dict, min_edge: float, verbose: bool = False) -> dic
         "market_price": current_price,
         "edge": round(edge, 3),
         "side": side,
+        "entry_price": entry_price,
         "days_ahead": days_ahead,
     }
 
 
-def compute_bet_size(edge: float, balance: float, config: dict) -> float:
-    """Size bet based on edge magnitude. Capped at max_bet and % of balance."""
-    max_bet = float(config.get("max_bet", 50))
-    max_pct = float(config.get("max_pct_balance", 0.02))  # 2%
+def compute_bet_size(
+    edge: float,
+    balance: float,
+    config: dict,
+    entry_price: float = 0.5,
+    venue: str = "sim",
+) -> float:
+    """Size bet based on edge magnitude.
+
+    Polymarket constraints:
+    - Minimum $1 per order
+    - Minimum 5 shares per order (cost = 5 * entry_price)
+    - 10% fee (fee_rate_bps=1000)
+    """
+    max_bet = float(config.get("max_bet", config.get("max_bet_usdc", 50)))
+    max_pct = float(config.get("max_pct_balance", 0.02))
     min_edge = float(config.get("min_edge", 0.15))
 
     abs_edge = abs(edge)
     # Linear scale: at min_edge → 0.3x, at 0.40+ → 1.0x
     scale = min(1.0, max(0.3, (abs_edge - min_edge) / (0.40 - min_edge) * 0.7 + 0.3))
     base = min(max_bet, balance * max_pct)
-    return round(base * scale, 2)
+    bet = base * scale
+
+    if venue == "polymarket":
+        # Polymarket minimums: $1 order AND 5 shares minimum
+        # 5 shares at entry_price = 5 * entry_price USDC needed
+        min_for_5_shares = max(1.0, 5.0 * entry_price)
+        if bet < min_for_5_shares:
+            # Skip if we can't meet minimum without exceeding max_bet
+            if min_for_5_shares > max_bet:
+                return 0
+            bet = min_for_5_shares
+
+    return round(bet, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -599,11 +626,15 @@ class WeatherBot:
 
         # Execute top N per cycle
         max_per_cycle = int(self.config.get("max_trades_per_cycle", 3))
-        # In polymarket real we must be stricter on bet floor (min $0.50)
-        min_bet = 0.5 if self.venue == "polymarket" else 1.0
+        min_bet = 1.0  # Simmer/Polymarket minimum $1 per order
         for opp in opportunities[:max_per_cycle]:
-            bet = compute_bet_size(opp["edge"], balance, self.config)
+            bet = compute_bet_size(
+                opp["edge"], balance, self.config,
+                entry_price=opp.get("entry_price", 0.5),
+                venue=self.venue,
+            )
             if bet < min_bet:
+                logger.info(f"SKIP (bet too small): {opp['title'][:50]} bet={bet}")
                 continue
 
             reason = (
