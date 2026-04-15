@@ -367,7 +367,8 @@ def fetch_markets(api_key: str, limit: int = 100) -> list[dict]:
         return []
 
 
-def fetch_balance(api_key: str) -> float:
+def fetch_balance(api_key: str, venue: str = "sim") -> float:
+    """Returns balance for the configured venue (sim $SIM or polymarket USDC)."""
     try:
         resp = SESSION.get(
             f"{SIMMER_API}/agents/me",
@@ -375,17 +376,30 @@ def fetch_balance(api_key: str) -> float:
             timeout=REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
-        return float(resp.json().get("balance", 0))
+        data = resp.json()
+        if venue == "polymarket":
+            return float(
+                data.get("polymarket_balance")
+                or data.get("polymarket_usdc")
+                or data.get("balance", 0)
+            )
+        return float(data.get("balance", 0))
     except Exception as e:
         logger.error(f"fetch_balance failed: {e}")
         return -1.0
 
 
 def place_order(
-    api_key: str, market_id: str, side: str, amount: float, reason: str, dry_run: bool = False
+    api_key: str,
+    market_id: str,
+    side: str,
+    amount: float,
+    reason: str,
+    venue: str = "sim",
+    dry_run: bool = False,
 ) -> dict:
     if dry_run:
-        logger.info(f"[DRY RUN] {side} {amount} on {market_id}: {reason}")
+        logger.info(f"[DRY RUN] {venue} {side} {amount} on {market_id}: {reason}")
         return {"executed": False, "dry_run": True}
     try:
         resp = SESSION.post(
@@ -395,13 +409,15 @@ def place_order(
                 "market_id": market_id,
                 "side": side.lower(),
                 "amount": amount,
-                "venue": "sim",
+                "venue": venue,
                 "reasoning": reason[:200],
                 "source": "sdk:weather-bot",
             },
             timeout=REQUEST_TIMEOUT,
         )
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            logger.error(f"place_order HTTP {resp.status_code}: {resp.text[:300]}")
+            return {"executed": False, "error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
         return {"executed": True, "response": resp.json()}
     except Exception as e:
         logger.error(f"place_order failed: {e}")
@@ -536,15 +552,18 @@ class WeatherBot:
         self.running = True
         self.state = load_state()
         self.api_key = config["simmer_api_key"]
+        self.venue = config.get("venue", "sim")
         self.min_edge = float(config.get("min_edge", 0.15))
-        self.max_bet = float(config.get("max_bet", 50))
+        self.max_bet = float(config.get("max_bet", config.get("max_bet_usdc", 50)))
         self.dry_run = config.get("dry_run", False)
         self.cycle_interval = int(config.get("cycle_interval_seconds", 180))
+        self.currency = "USDC" if self.venue == "polymarket" else "$SIM"
 
     def cycle(self) -> None:
-        balance = fetch_balance(self.api_key)
-        if balance < 10:
-            logger.warning(f"Balance too low: {balance}. Skipping cycle.")
+        balance = fetch_balance(self.api_key, venue=self.venue)
+        min_balance = 1 if self.venue == "polymarket" else 10
+        if balance < min_balance:
+            logger.warning(f"Balance too low: {balance} {self.currency}. Skipping cycle.")
             return
 
         markets = fetch_markets(self.api_key, limit=100)
@@ -580,9 +599,11 @@ class WeatherBot:
 
         # Execute top N per cycle
         max_per_cycle = int(self.config.get("max_trades_per_cycle", 3))
+        # In polymarket real we must be stricter on bet floor (min $0.50)
+        min_bet = 0.5 if self.venue == "polymarket" else 1.0
         for opp in opportunities[:max_per_cycle]:
             bet = compute_bet_size(opp["edge"], balance, self.config)
-            if bet < 1:
+            if bet < min_bet:
                 continue
 
             reason = (
@@ -591,31 +612,47 @@ class WeatherBot:
                 f"(days_ahead={opp['days_ahead']}). "
                 f"P_real={opp['p_yes_real']}, market={opp['market_price']:.2f}, edge={opp['edge']:+.2f}"
             )
-            logger.info(f"TRADE: {opp['side'].upper()} {bet}$SIM on '{opp['title'][:60]}' | {reason}")
+            logger.info(f"TRADE [{self.venue}]: {opp['side'].upper()} {bet}{self.currency} on '{opp['title'][:60]}' | {reason}")
 
-            result = place_order(self.api_key, opp["market_id"], opp["side"], bet, reason, self.dry_run)
+            result = place_order(
+                self.api_key, opp["market_id"], opp["side"], bet, reason,
+                venue=self.venue, dry_run=self.dry_run,
+            )
 
             if result.get("executed"):
                 self.state["traded_markets"].append(opp["market_id"])
                 self.state["total_trades"] = self.state.get("total_trades", 0) + 1
                 save_state(self.state)
                 send_telegram(
-                    f"*Weather Trade*\n{opp['side'].upper()} {bet}$SIM\n{opp['title'][:80]}\n"
+                    f"*Weather Trade [{self.venue}]*\n{opp['side'].upper()} {bet}{self.currency}\n{opp['title'][:80]}\n"
                     f"Edge: {opp['edge']:+.2f} | P_real: {opp['p_yes_real']} | Price: {opp['market_price']:.2f}",
                     self.config,
                 )
-                balance -= bet  # rough tracking
+                balance -= bet
+            else:
+                err = result.get("error", "unknown")
+                logger.error(f"Trade failed: {err}")
+                # Hard stop if first real trade fails — fix before losing money
+                if self.venue == "polymarket":
+                    send_telegram(
+                        f"*Weather Trade FAILED [{self.venue}]*\n{opp['title'][:80]}\nError: {err[:200]}",
+                        self.config,
+                    )
 
     def run(self) -> None:
         logger.info("=" * 60)
-        logger.info("WEATHER BOT STARTING")
-        logger.info(f"Min edge: {self.min_edge}, Max bet: {self.max_bet}, Dry run: {self.dry_run}")
+        logger.info(f"WEATHER BOT STARTING [venue={self.venue.upper()}]")
+        logger.info(f"Min edge: {self.min_edge}, Max bet: {self.max_bet}{self.currency}, Dry run: {self.dry_run}")
         logger.info(f"Cycle interval: {self.cycle_interval}s")
         logger.info("=" * 60)
 
-        bal = fetch_balance(self.api_key)
-        logger.info(f"Starting balance: {bal} $SIM")
-        send_telegram(f"*Weather Bot started*\nBalance: {bal} $SIM\nMin edge: {self.min_edge}", self.config)
+        bal = fetch_balance(self.api_key, venue=self.venue)
+        logger.info(f"Starting balance: {bal} {self.currency}")
+        send_telegram(
+            f"*Weather Bot started* [{self.venue}]\nBalance: {bal} {self.currency}\n"
+            f"Min edge: {self.min_edge} | Max bet: {self.max_bet}{self.currency}",
+            self.config,
+        )
 
         while self.running:
             try:
