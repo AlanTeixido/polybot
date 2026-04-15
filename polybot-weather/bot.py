@@ -422,7 +422,13 @@ def place_order(
         if resp.status_code >= 400:
             logger.error(f"place_order HTTP {resp.status_code}: {resp.text[:300]}")
             return {"executed": False, "error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
-        return {"executed": True, "response": resp.json()}
+        body = resp.json()
+        # Simmer returns HTTP 200 with {success: false, error: ...} for logical failures
+        if not body.get("success", False):
+            err = body.get("error", "unknown") or "no success field"
+            logger.error(f"place_order rejected: {err}")
+            return {"executed": False, "error": err, "response": body}
+        return {"executed": True, "response": body}
     except Exception as e:
         logger.error(f"place_order failed: {e}")
         return {"executed": False, "error": str(e)}
