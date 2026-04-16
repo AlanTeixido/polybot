@@ -10,7 +10,8 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\('agent.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\('tools/weather.py'\\).read\\(\\)\\); print\\('weather.py: OK'\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\('tools/polymarket.py'\\).read\\(\\)\\); print\\('polymarket.py: OK'\\)\")",
-      "Bash(python -c \"import ast; ast.parse\\(open\\('polybot-weather/bot.py'\\).read\\(\\)\\); print\\('bot.py: OK'\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\('polybot-weather/bot.py'\\).read\\(\\)\\); print\\('bot.py: OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('tools/polymarket.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
     ]
   }
 }

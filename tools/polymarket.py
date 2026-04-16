@@ -383,7 +383,12 @@ def get_market_detail(
             resp.raise_for_status()
             m = resp.json()
 
-            prob = float(m.get("probability", m.get("yes_probability", 0.5)) or 0.5)
+            prob = float(
+                m.get("current_probability",
+                       m.get("current_price",
+                              m.get("probability",
+                                     m.get("yes_probability", 0.5)))) or 0.5
+            )
             if prob > 1:
                 prob = prob / 100
             yes_price = prob
