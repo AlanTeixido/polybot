@@ -121,7 +121,7 @@ def get_markets(
         try:
             resp = SESSION.get(
                 f"{SIMMER_API}/markets",
-                params={"limit": 50},
+                params={"limit": 100},
                 headers={"Authorization": f"Bearer {simmer_api_key}"},
                 timeout=REQUEST_TIMEOUT,
             )

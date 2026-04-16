@@ -655,6 +655,20 @@ class WeatherBot:
             logger.info("No markets fetched")
             return
 
+        # Clean stale traded_markets: remove IDs not in current market list
+        # This prevents the state file from growing forever
+        if self._cycle_num % 50 == 0:  # every ~50 cycles
+            active_ids = {m.get("id") for m in markets if m.get("id")}
+            old_count = len(self.state.get("traded_markets", []))
+            self.state["traded_markets"] = [
+                mid for mid in self.state.get("traded_markets", [])
+                if mid in active_ids
+            ]
+            cleaned = old_count - len(self.state["traded_markets"])
+            if cleaned > 0:
+                logger.info(f"Cleaned {cleaned} stale entries from traded_markets")
+                save_state(self.state)
+
         # Filter to weather markets
         weather_markets = [m for m in markets if any(kw in (m.get("question", "") or "").lower() for kw in ["temperature", "°c", "°f"])]
 

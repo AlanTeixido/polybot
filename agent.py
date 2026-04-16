@@ -563,11 +563,37 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
                     "gate": "weather_forecast_required",
                 }
 
+        # --- Kelly sizing cap: prevent LLM from over-betting on low-probability trades ---
+        requested_amount = args["amount_usdc"]
+        max_bet = config.get("max_bet_usdc", 5)
+        balance = config.get("_cached_balance", 1000)
+        if balance > 0 and requested_amount > 0:
+            from tools.polymarket import get_market_detail as _gmd
+            _detail = _gmd(args["market_id"], venue=venue, simmer_api_key=simmer_key)
+            if "error" not in _detail:
+                _side = args["side"].upper()
+                _entry = _detail.get("yes_price", 0.5) if _side == "YES" else _detail.get("no_price", 0.5)
+                if 0 < _entry < 1:
+                    _payout = (1 - _entry) / _entry
+                    # Use a conservative estimate: assume our edge is 15pts above market
+                    _p_win = min(0.85, _entry + 0.15)
+                    _kelly = (_p_win * _payout - (1 - _p_win)) / _payout
+                    _half_kelly = max(0, _kelly / 2)
+                    # Kelly cap: max bet = half_kelly fraction of balance, capped at max_bet
+                    kelly_max = min(max_bet, balance * _half_kelly)
+                    kelly_max = max(kelly_max, 1.0)  # at least $1
+                    if requested_amount > kelly_max:
+                        logger.info(
+                            f"Kelly cap: LLM requested {requested_amount}, "
+                            f"capped to {kelly_max:.1f} (entry={_entry:.2f}, kelly={_half_kelly:.3f})"
+                        )
+                        requested_amount = round(kelly_max, 2)
+
         result = place_order(
             market_id=args["market_id"],
             market_title=args.get("market_title", ""),
             side=args["side"],
-            amount_usdc=args["amount_usdc"],
+            amount_usdc=requested_amount,
             reason=args.get("reason", ""),
             wallet_address=wallet,
             private_key=private_key,
