@@ -185,6 +185,7 @@ def get_weather_forecast(
     city: str,
     target_date: str = "",
     threshold_c: float | None = None,
+    threshold_c_high: float | None = None,
     comparison: str = "above",
     metric: str = "high",
 ) -> dict[str, Any]:
@@ -193,9 +194,10 @@ def get_weather_forecast(
     Args:
         city: City name (e.g. "Atlanta", "Shanghai")
         target_date: Date to forecast (YYYY-MM-DD). Optional.
-        threshold_c: Temperature threshold in °C. If provided, calculates probability.
-        comparison: "above", "below", or "equal" (for exact temp markets)
-        metric: "high" for max temp, "low" for min temp. Use "low" for "minimum temperature" markets.
+        threshold_c: Temperature threshold in °C. For ranges, this is the LOW bound.
+        threshold_c_high: For range markets ("between X-Y"), the HIGH bound in °C.
+        comparison: "above", "below", "equal", or "range". Use "range" with threshold_c + threshold_c_high.
+        metric: "high" for max temp, "low" for min temp.
 
     Returns dict with:
         - forecasts: list of {date, high_c, low_c, high_f, low_f, source}
@@ -240,12 +242,24 @@ def get_weather_forecast(
                 except Exception:
                     days_ahead = 3  # fallback
 
-            prob = _estimate_probability(forecast_temp, threshold_c, comparison, days_ahead=days_ahead)
+            # Range calculation: P(low <= temp <= high)
+            if comparison == "range" and threshold_c_high is not None:
+                import math as _math
+                std_dev = max(1.5, 1.0 + days_ahead * 0.4)
+                z_low = (threshold_c - forecast_temp) / std_dev
+                z_high = (threshold_c_high - forecast_temp) / std_dev
+                p_low = 0.5 * (1 + _math.erf(z_low / _math.sqrt(2)))
+                p_high = 0.5 * (1 + _math.erf(z_high / _math.sqrt(2)))
+                prob = round(p_high - p_low, 3)
+            else:
+                prob = _estimate_probability(forecast_temp, threshold_c, comparison, days_ahead=days_ahead)
+
             result["probability"] = prob
             result["days_ahead"] = days_ahead
             result["edge_info"] = {
                 "forecast_temp_c": forecast_temp,
                 "threshold_c": threshold_c,
+                "threshold_c_high": threshold_c_high,
                 "metric": metric,
                 "comparison": comparison,
                 "probability": prob,

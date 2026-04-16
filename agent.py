@@ -298,14 +298,15 @@ TOOLS = [
     },
     {
         "name": "get_weather_forecast",
-        "description": "Get weather forecast + probability for weather markets. Pass threshold_c, comparison, and metric. For 'highest/maximum temperature' markets use metric='high'. For 'minimum/lowest temperature' markets use metric='low'. Returns probability to compare vs market price.",
+        "description": "Get weather forecast + probability for weather markets. Pass threshold_c, comparison, and metric. For 'highest/maximum temperature' markets use metric='high'. For 'minimum/lowest temperature' markets use metric='low'. For 'between X-Y°F' range markets use comparison='range' with threshold_c (low bound) and threshold_c_high (high bound), both in °C. Returns probability to compare vs market price.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "city": {"type": "string", "description": "City name (e.g. 'Atlanta', 'Shanghai')"},
                 "target_date": {"type": "string", "description": "Date (YYYY-MM-DD). Optional."},
-                "threshold_c": {"type": "number", "description": "Temperature threshold in °C from the market. Convert °F to °C if needed."},
-                "comparison": {"type": "string", "description": "'above', 'below', or 'equal'. Default: 'above'"},
+                "threshold_c": {"type": "number", "description": "Temperature threshold in °C. For range markets, this is the LOW bound. Convert °F to °C if needed."},
+                "threshold_c_high": {"type": "number", "description": "For range markets only: HIGH bound in °C. Use with comparison='range'."},
+                "comparison": {"type": "string", "description": "'above', 'below', 'equal', or 'range'. Use 'range' for 'between X-Y°F' markets. Default: 'above'"},
                 "metric": {"type": "string", "description": "'high' for maximum temp markets, 'low' for minimum temp markets. Default: 'high'"},
             },
             "required": ["city"],
@@ -346,7 +347,9 @@ PROVEN WINNING STRATEGIES (from top Simmer leaderboard agents):
    - Cities like Singapore, Jeddah, Lagos, Lucknow have very different climates than you think.
    - Only trade if the tool returns a probability that differs from market price by >15 points.
    - For exact-temp markets ("be X°C"), require >22 points of edge — they're harder to predict.
-   - For range markets ("between X-Y°F"), require >20 points of edge.
+   - For range markets ("between X-Y°F"), use comparison='range' with threshold_c (low °C) and
+     threshold_c_high (high °C). Require >25 points of edge — ranges are narrow (~1°C) and
+     hard to predict accurately. Convert °F to °C before calling.
    - If the tool errors or city not found, SKIP the trade — do not guess.
 
 2. POLITICS/ECONOMY (tier1, use news data):
@@ -646,6 +649,7 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
             args["city"],
             target_date,
             threshold_c=args.get("threshold_c"),
+            threshold_c_high=args.get("threshold_c_high"),
             comparison=args.get("comparison", "above"),
             metric=args.get("metric", "high"),
         )

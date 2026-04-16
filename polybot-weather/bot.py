@@ -507,7 +507,7 @@ def evaluate_market(market: dict, min_edge: float, verbose: bool = False) -> dic
     if parsed["comparison"] == "equal":
         effective_min_edge = max(min_edge, 0.22)  # At least 22% edge for exact temps
     elif parsed["comparison"] == "range":
-        effective_min_edge = max(min_edge, 0.20)  # At least 20% edge for range markets
+        effective_min_edge = max(min_edge, 0.25)  # At least 25% edge for range markets (narrow 1°C window)
 
     if abs_edge < effective_min_edge:
         return None
