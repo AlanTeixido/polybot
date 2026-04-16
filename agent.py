@@ -345,6 +345,8 @@ PROVEN WINNING STRATEGIES (from top Simmer leaderboard agents):
    - NEVER guess based on "seasonal norms" — you don't know global climates. Use the tool.
    - Cities like Singapore, Jeddah, Lagos, Lucknow have very different climates than you think.
    - Only trade if the tool returns a probability that differs from market price by >15 points.
+   - For exact-temp markets ("be X°C"), require >22 points of edge — they're harder to predict.
+   - For range markets ("between X-Y°F"), require >20 points of edge.
    - If the tool errors or city not found, SKIP the trade — do not guess.
 
 2. POLITICS/ECONOMY (tier1, use news data):
@@ -367,14 +369,15 @@ MARKET TIERS (pre-filtered by code):
 - tier2: Major sports leagues — check standings
 - tier3: Spreads, O/U — only with strong data
 
-POSITION SIZING (adaptive, based on edge):
-- edge 5-10pts: small bet (0.3x max_bet)
-- edge 10-20pts: medium bet (0.6x max_bet)
-- edge 20pts+: large bet (1.0x max_bet)
-- tier1 markets: multiply by 1.5x (capped at max_bet)
+POSITION SIZING (Half-Kelly criterion):
+- Size based on edge AND entry price using Kelly formula
+- Cheap entries ($0.15-$0.30): can bet larger — good risk/reward
+- Expensive entries ($0.60-$0.75): bet smaller — poor risk/reward
+- tier1 markets: multiply by 1.3x (capped at max_bet)
 - tier3 markets: multiply by 0.5x
 - Whale confirmation (2+ wallets): multiply by 1.3x
 - NEVER exceed max_bet_usdc or 20% of balance
+- When in doubt, bet LESS — surviving is more important than maximizing
 
 ASYMMETRY RULE (most important rule — this is how you make money):
 - Buying at $0.80 means risking $0.80 to gain $0.20. You need 80%+ win rate to break even.
@@ -389,6 +392,10 @@ HARD RULES:
 - NEVER trade without citing specific evidence
 - If prescan data is in the initial message, DO NOT re-fetch it with tools
 - Markets you already have a position in: blocked by code (no stacking)
+- NEVER buy YES on exact-temperature markets ("Will temp be X°C?"). The probability
+  of hitting EXACTLY one degree is inherently low (~10-20%). Cheap YES is correctly
+  priced, NOT undervalued. Only trade the NO side of these. This is enforced in code.
+- Max 3 positions per city+date combination (correlation limit, enforced in code)
 
 WHALE TRACKING:
 Whale wallets are top Polymarket traders by profit (millions in verified gains).
@@ -524,6 +531,22 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
                              "Cannot verify with forecast data. SKIP this market — trade one where the city is clear.",
                     "executed": False,
                     "gate": "no_city_in_title",
+                }
+
+            # Block YES on exact-temp markets ("be X°C" without "or higher/below/between")
+            side_check = (args.get("side", "") or "").upper()
+            is_exact_temp = (
+                "or higher" not in title and "or below" not in title and
+                "or lower" not in title and "or above" not in title and
+                "between" not in title and "or more" not in title
+            )
+            if is_exact_temp and side_check == "YES":
+                return {
+                    "error": "BLOCKED: Never buy YES on exact-temperature markets. "
+                             "P(exactly X°C) is inherently low (~10-20%), so cheap YES prices are "
+                             "correctly priced, not undervalued. Trade the NO side instead.",
+                    "executed": False,
+                    "gate": "no_yes_on_exact_temp",
                 }
 
             # Check if that city was forecast-checked this cycle

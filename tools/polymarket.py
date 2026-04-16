@@ -648,21 +648,65 @@ def place_order(
     if side not in ("YES", "NO"):
         return {"error": f"Invalid side: {side}. Must be YES or NO.", "executed": False}
 
-    # --- Breakeven gate + max entry price (Polymarket only, SIM is unrestricted) ---
-    if venue != "sim":
-        detail_for_check = get_market_detail(market_id, venue=venue, simmer_api_key=simmer_api_key)
-        if "error" not in detail_for_check:
-            entry_price = detail_for_check.get("yes_price", 0.5) if side == "YES" else detail_for_check.get("no_price", 0.5)
-            max_entry = 0.75
-            if entry_price > max_entry:
+    # --- Entry price gate (all venues including SIM) ---
+    detail_for_entry = get_market_detail(market_id, venue=venue, simmer_api_key=simmer_api_key)
+    if "error" not in detail_for_entry:
+        entry_price = detail_for_entry.get("yes_price", 0.5) if side == "YES" else detail_for_entry.get("no_price", 0.5)
+        max_entry = 0.75 if venue != "sim" else 0.85
+        if entry_price > max_entry:
+            return {
+                "error": f"Entry price {entry_price:.2f} too high (max {max_entry}). "
+                         f"Risk/reward unfavorable — seek cheaper side.",
+                "executed": False,
+            }
+
+    # --- Correlation limit: max 3 positions per city+date ---
+    positions = get_positions(wallet_address, venue=venue, simmer_api_key=simmer_api_key)
+    title_lower = (market_title or "").lower()
+    if any(kw in title_lower for kw in ["temperature", "°c", "°f"]):
+        import re
+        # Extract city from title
+        _city_in_title = None
+        for _city_name in ["new york", "los angeles", "san francisco", "mexico city",
+                           "hong kong", "cape town", "ho chi minh", "kuala lumpur",
+                           "sao paulo", "rio de janeiro", "buenos aires", "las vegas",
+                           "san diego", "san antonio"]:
+            if _city_name in title_lower:
+                _city_in_title = _city_name
+                break
+        if not _city_in_title:
+            # Single-word city match
+            for _city_name in ["atlanta", "tokyo", "seoul", "london", "paris", "seattle",
+                               "miami", "dallas", "houston", "chicago", "denver", "toronto",
+                               "shanghai", "beijing", "shenzhen", "guangzhou", "singapore",
+                               "istanbul", "moscow", "manila", "mumbai", "lagos", "cairo",
+                               "sydney", "berlin", "madrid", "rome", "bangkok", "lucknow",
+                               "chongqing", "wuhan", "chengdu", "busan", "osaka", "milan",
+                               "amsterdam", "vienna", "warsaw"]:
+                if _city_name in title_lower:
+                    _city_in_title = _city_name
+                    break
+        # Extract date from title
+        _date_match = re.search(r"(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}", title_lower)
+        _date_key = _date_match.group(0) if _date_match else ""
+
+        if _city_in_title and _date_key:
+            corr_key = f"{_city_in_title}|{_date_key}"
+            corr_count = 0
+            for pos in positions:
+                if isinstance(pos, dict) and "error" not in pos:
+                    pos_title = (pos.get("title", "") or "").lower()
+                    if _city_in_title in pos_title and _date_key in pos_title:
+                        corr_count += 1
+            max_correlated = 3
+            if corr_count >= max_correlated:
                 return {
-                    "error": f"Entry price {entry_price:.2f} too high. Max: {max_entry}. "
-                             f"Need {entry_price:.0%} WR to break even — seek cheaper side.",
+                    "error": f"Correlation limit: already {corr_count} positions on "
+                             f"'{_city_in_title}' for '{_date_key}'. Max {max_correlated} per city+date.",
                     "executed": False,
                 }
 
     # Block duplicate and conflicting positions
-    positions = get_positions(wallet_address, venue=venue, simmer_api_key=simmer_api_key)
     for pos in positions:
         if isinstance(pos, dict) and pos.get("market_id") == market_id:
             existing_side = pos.get("side", "").upper()

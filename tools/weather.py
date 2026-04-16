@@ -143,18 +143,20 @@ def _get_nws_grid(lat: float, lon: float) -> dict | None:
         return None
 
 
-def _estimate_probability(forecast_temp: float, threshold: float, comparison: str = "above") -> float:
+def _estimate_probability(forecast_temp: float, threshold: float, comparison: str = "above", days_ahead: int = 1) -> float:
     """Estimate probability that actual temp will be above/below/equal to threshold.
 
-    Uses a normal distribution around the forecast with std_dev based on
-    typical forecast error (~2°C for 1-3 day forecasts, ~3.5°C for 4-7 day).
-    This converts a point forecast into a probability — the key edge for weather markets.
+    Uses a normal distribution around the forecast with std_dev that grows
+    with forecast horizon — matching real forecast error patterns:
+    - 1 day: ~1.5°C (very accurate)
+    - 3 days: ~2.2°C
+    - 7 days: ~3.8°C
     """
     import math
 
-    # Typical forecast error (standard deviation in °C)
-    # NWS/GFS accuracy: ~1.5-2°C for day 1-2, ~2.5-3.5°C for day 3-7
-    std_dev = 2.5  # Conservative middle estimate
+    # Dynamic forecast error: grows linearly with days ahead
+    # Matches weather-bot: max(1.5, 1.0 + days_ahead * 0.4)
+    std_dev = max(1.5, 1.0 + days_ahead * 0.4)
 
     if std_dev == 0:
         return 1.0 if forecast_temp >= threshold else 0.0
@@ -227,14 +229,28 @@ def get_weather_forecast(
                      and f.get("is_daytime", True)]
         if temps:
             forecast_temp = temps[0]
-            prob = _estimate_probability(forecast_temp, threshold_c, comparison)
+
+            # Calculate days_ahead for dynamic uncertainty
+            days_ahead = 1
+            if target_date and result.get("forecasts"):
+                try:
+                    from datetime import datetime as _dt, timezone as _tz
+                    target_dt = _dt.fromisoformat(target_date).replace(tzinfo=_tz.utc)
+                    days_ahead = max(1, (target_dt - _dt.now(_tz.utc)).days)
+                except Exception:
+                    days_ahead = 3  # fallback
+
+            prob = _estimate_probability(forecast_temp, threshold_c, comparison, days_ahead=days_ahead)
             result["probability"] = prob
+            result["days_ahead"] = days_ahead
             result["edge_info"] = {
                 "forecast_temp_c": forecast_temp,
                 "threshold_c": threshold_c,
                 "metric": metric,
                 "comparison": comparison,
                 "probability": prob,
+                "days_ahead": days_ahead,
+                "std_dev_used": round(max(1.5, 1.0 + days_ahead * 0.4), 2),
                 "confidence": "high" if abs(forecast_temp - threshold_c) > 5 else "medium" if abs(forecast_temp - threshold_c) > 2 else "low",
             }
 

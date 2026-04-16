@@ -501,10 +501,27 @@ def evaluate_market(market: dict, min_edge: float, verbose: bool = False) -> dic
             f"P_real={p_yes:.2f} market={current_price:.2f} edge={edge:+.2f}"
         )
 
-    if abs_edge < min_edge:
+    # Higher min_edge for exact-temp markets — they're harder to predict
+    # and the distribution is narrow, so we need more edge to be confident
+    effective_min_edge = min_edge
+    if parsed["comparison"] == "equal":
+        effective_min_edge = max(min_edge, 0.22)  # At least 22% edge for exact temps
+    elif parsed["comparison"] == "range":
+        effective_min_edge = max(min_edge, 0.20)  # At least 20% edge for range markets
+
+    if abs_edge < effective_min_edge:
         return None
 
     side = "yes" if edge > 0 else "no"
+
+    # RULE: Never buy YES on exact-temp markets — probability is inherently low
+    # (P(exactly X°C) ~ 10-20%) so cheap YES prices are correctly priced, not undervalued.
+    # Only trade the NO side of exact-temp markets.
+    if parsed["comparison"] == "equal" and side == "yes":
+        if verbose:
+            logger.info(f"  SKIP (no YES on exact-temp): {title[:60]} edge={edge:+.2f}")
+        return None
+
     # Entry price is the side we're buying
     entry_price = current_price if side == "yes" else (1 - current_price)
 
@@ -531,8 +548,15 @@ def compute_bet_size(
     config: dict,
     entry_price: float = 0.5,
     venue: str = "sim",
+    p_real: float = 0.5,
 ) -> float:
-    """Size bet based on edge magnitude.
+    """Size bet using fractional Kelly criterion for optimal long-term growth.
+
+    Kelly formula: f* = (p * b - q) / b
+    where p = probability of winning, q = 1-p, b = payout odds (net profit / stake)
+
+    We use HALF Kelly (f*/2) to reduce variance — full Kelly is too aggressive
+    and assumes perfect probability estimates, which we don't have.
 
     Polymarket constraints:
     - Minimum $1 per order
@@ -541,13 +565,36 @@ def compute_bet_size(
     """
     max_bet = float(config.get("max_bet", config.get("max_bet_usdc", 50)))
     max_pct = float(config.get("max_pct_balance", 0.02))
-    min_edge = float(config.get("min_edge", 0.15))
 
     abs_edge = abs(edge)
-    # Linear scale: at min_edge → 0.3x, at 0.40+ → 1.0x
-    scale = min(1.0, max(0.3, (abs_edge - min_edge) / (0.40 - min_edge) * 0.7 + 0.3))
+
+    # Kelly criterion sizing
+    # p = our estimated probability of winning this bet
+    # b = payout odds = (1 - entry_price) / entry_price for YES,
+    #     simplified: what we gain per dollar risked
+    if entry_price <= 0 or entry_price >= 1:
+        return 0
+
+    p_win = p_real if edge > 0 else (1 - p_real)  # our prob that our side wins
+    payout_odds = (1 - entry_price) / entry_price  # net profit per $1 risked
+
+    if payout_odds <= 0:
+        return 0
+
+    # Kelly fraction: f* = (p * b - q) / b
+    q_lose = 1 - p_win
+    kelly_fraction = (p_win * payout_odds - q_lose) / payout_odds
+
+    # If Kelly says don't bet (negative edge), skip
+    if kelly_fraction <= 0:
+        return 0
+
+    # Use HALF Kelly to reduce variance (standard practice)
+    half_kelly = kelly_fraction / 2
+
+    # Apply bankroll constraints
     base = min(max_bet, balance * max_pct)
-    bet = base * scale
+    bet = base * min(1.0, half_kelly / 0.05)  # normalize: 5% half-kelly = full base bet
 
     if venue == "polymarket":
         # Simmer charges 10% fee BEFORE calculating shares, and price slips on impact.
@@ -616,13 +663,35 @@ class WeatherBot:
         verbose = (self._cycle_num % 10 == 1)
         logger.info(f"Cycle {self._cycle_num}: {len(markets)} markets, {len(weather_markets)} weather {'[VERBOSE]' if verbose else ''}")
 
+        # Count existing positions per city+date for correlation limits
+        _city_date_counts: dict[str, int] = {}
+        for mid in self.state.get("traded_markets", []):
+            # We track by market title but only have IDs in state;
+            # count from the current weather_markets that are already traded
+            pass
+        for m in weather_markets:
+            if m.get("id") in self.state.get("traded_markets", []):
+                _title = (m.get("question", "") or "").lower()
+                _parsed = parse_weather_market(_title)
+                _tdate = parse_target_date(_title)
+                if _parsed and _tdate:
+                    _ck = f"{_parsed['city']}|{_tdate}"
+                    _city_date_counts[_ck] = _city_date_counts.get(_ck, 0) + 1
+
         # Evaluate each
         opportunities = []
+        max_correlated = 3
         for m in weather_markets:
             if m.get("id") in self.state.get("traded_markets", []):
                 continue  # already traded this market
             decision = evaluate_market(m, self.min_edge, verbose=verbose)
             if decision:
+                # Check correlation limit
+                _ck = f"{decision['city']}|{parse_target_date(decision['title']) or ''}"
+                if _city_date_counts.get(_ck, 0) >= max_correlated:
+                    if verbose:
+                        logger.info(f"  SKIP (correlation limit {max_correlated}): {decision['city']} {_ck}")
+                    continue
                 opportunities.append(decision)
 
         # Sort by edge descending
@@ -634,14 +703,15 @@ class WeatherBot:
 
         logger.info(f"Found {len(opportunities)} opportunities")
 
-        # Execute top N per cycle
-        max_per_cycle = int(self.config.get("max_trades_per_cycle", 3))
+        # Execute top N per cycle (default 1 — be selective, pick only the best)
+        max_per_cycle = int(self.config.get("max_trades_per_cycle", 1))
         min_bet = 1.0  # Simmer/Polymarket minimum $1 per order
         for opp in opportunities[:max_per_cycle]:
             bet = compute_bet_size(
                 opp["edge"], balance, self.config,
                 entry_price=opp.get("entry_price", 0.5),
                 venue=self.venue,
+                p_real=opp.get("p_yes_real", 0.5),
             )
             if bet < min_bet:
                 logger.info(f"SKIP (bet too small): {opp['title'][:50]} bet={bet}")
@@ -663,6 +733,9 @@ class WeatherBot:
             if result.get("executed"):
                 self.state["traded_markets"].append(opp["market_id"])
                 self.state["total_trades"] = self.state.get("total_trades", 0) + 1
+                # Update correlation counter
+                _ck = f"{opp['city']}|{parse_target_date(opp['title']) or ''}"
+                _city_date_counts[_ck] = _city_date_counts.get(_ck, 0) + 1
                 save_state(self.state)
                 send_telegram(
                     f"*Weather Trade [{self.venue}]*\n{opp['side'].upper()} {bet}{self.currency}\n{opp['title'][:80]}\n"
