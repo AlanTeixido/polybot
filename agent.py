@@ -510,6 +510,16 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
                 "executed": False,
             }
 
+        # LOCAL DUPLICATE CHECK: prevents stacking when Simmer API has delay
+        _traded_ids = config.get("_traded_market_ids", set())
+        if not isinstance(_traded_ids, set):
+            _traded_ids = set()
+        if args["market_id"] in _traded_ids:
+            return {
+                "error": f"Already traded market {args['market_id']} this session. No stacking.",
+                "executed": False,
+            }
+
         # WEATHER GATE: weather markets require get_weather_forecast first
         title = (args.get("market_title", "") or "").lower()
         weather_keywords = ["temperature", "°c", "°f", "weather", "rain", "snow", "wind",
@@ -605,9 +615,11 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
             venue=venue,
             simmer_api_key=simmer_key,
         )
-        # Count executed trades (no Telegram spam — stats go in periodic summary)
+        # Count executed trades and record market ID to prevent stacking
         if result.get("executed"):
             config["_trades_this_cycle"] = trades_this_cycle + 1
+            _traded_ids.add(args["market_id"])
+            config["_traded_market_ids"] = _traded_ids
         return result
 
     elif name == "get_trade_history":
@@ -831,6 +843,9 @@ class PolybotAgent:
         # IDs of positions that existed at startup — never mark these as resolved
         self._startup_position_ids: set[str] = set()
         self._startup_captured: bool = False
+        # Local cache of recently traded market IDs (prevents stacking across cycles
+        # when Simmer API has delay in reflecting new positions)
+        self._traded_market_ids: set[str] = set()
         # Balance cache (avoid double RPC calls per cycle)
         self._cached_balance: float = -1
         self._balance_cache_ts: float = 0
@@ -1044,6 +1059,7 @@ class PolybotAgent:
         self.config["_trades_this_cycle"] = 0
         self.config["_max_trades_per_cycle"] = self._max_trades_per_cycle
         self.config["_weather_checked_cities"] = set()
+        self.config["_traded_market_ids"] = self._traded_market_ids
         logger.info(f"=== CYCLE {self.cycle_count} START ===")
 
         # NOTE: _detect_resolved_trades disabled — was generating phantom losses
@@ -1183,6 +1199,11 @@ class PolybotAgent:
 
             if tool_results:
                 messages.append({"role": "user", "content": tool_results})
+
+        # Sync traded market IDs back from config (may have been updated by execute_tool)
+        _traded = self.config.get("_traded_market_ids", set())
+        if isinstance(_traded, set):
+            self._traded_market_ids = _traded
 
         # Snapshot current positions for next cycle's resolved-trade detection
         from tools.polymarket import get_positions as _get_pos
