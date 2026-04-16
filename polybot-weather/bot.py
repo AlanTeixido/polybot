@@ -437,7 +437,7 @@ def place_order(
 # ---------------------------------------------------------------------------
 # Trading logic
 # ---------------------------------------------------------------------------
-def evaluate_market(market: dict, min_edge: float, verbose: bool = False) -> dict | None:
+def evaluate_market(market: dict, min_edge: float, verbose: bool = False, venue_hint: str = "sim") -> dict | None:
     """Evaluate a single weather market. Returns trade decision or None."""
     title = market.get("question", "")
     market_id = market.get("id", "")
@@ -524,6 +524,14 @@ def evaluate_market(market: dict, min_edge: float, verbose: bool = False) -> dic
 
     # Entry price is the side we're buying
     entry_price = current_price if side == "yes" else (1 - current_price)
+
+    # Entry price gate: reject trades with terrible risk/reward
+    # Buying at 0.95 = risk $0.95 to gain $0.05 — needs 95% WR to break even
+    max_entry = 0.85 if venue_hint != "polymarket" else 0.75
+    if entry_price > max_entry:
+        if verbose:
+            logger.info(f"  SKIP (entry {entry_price:.2f} > {max_entry}): {title[:60]}")
+        return None
 
     return {
         "market_id": market_id,
@@ -698,7 +706,7 @@ class WeatherBot:
         for m in weather_markets:
             if m.get("id") in self.state.get("traded_markets", []):
                 continue  # already traded this market
-            decision = evaluate_market(m, self.min_edge, verbose=verbose)
+            decision = evaluate_market(m, self.min_edge, verbose=verbose, venue_hint=self.venue)
             if decision:
                 # Check correlation limit
                 _ck = f"{decision['city']}|{parse_target_date(decision['title']) or ''}"
