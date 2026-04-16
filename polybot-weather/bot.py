@@ -663,6 +663,9 @@ class WeatherBot:
             logger.info("No markets fetched")
             return
 
+        # Increment cycle counter
+        self._cycle_num = getattr(self, "_cycle_num", 0) + 1
+
         # Clean stale traded_markets: remove IDs not in current market list
         # This prevents the state file from growing forever
         if self._cycle_num % 50 == 0:  # every ~50 cycles
@@ -681,7 +684,6 @@ class WeatherBot:
         weather_markets = [m for m in markets if any(kw in (m.get("question", "") or "").lower() for kw in ["temperature", "°c", "°f"])]
 
         # Verbose debug every 10 cycles
-        self._cycle_num = getattr(self, "_cycle_num", 0) + 1
         verbose = (self._cycle_num % 10 == 1)
         logger.info(f"Cycle {self._cycle_num}: {len(markets)} markets, {len(weather_markets)} weather {'[VERBOSE]' if verbose else ''}")
 
