@@ -592,9 +592,21 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
 
     elif name == "get_weather_forecast":
         from tools.weather import get_weather_forecast
+        import re as _re
+
+        # Auto-correct year: Haiku sometimes sends 2024/2025 instead of current year
+        target_date = args.get("target_date", "")
+        if target_date:
+            current_year = time.strftime("%Y")
+            year_match = _re.match(r"(\d{4})-", target_date)
+            if year_match and year_match.group(1) != current_year:
+                old_year = year_match.group(1)
+                target_date = target_date.replace(old_year, current_year, 1)
+                logger.info(f"Date auto-corrected: {old_year} -> {current_year} ({target_date})")
+
         result = get_weather_forecast(
             args["city"],
-            args.get("target_date", ""),
+            target_date,
             threshold_c=args.get("threshold_c"),
             comparison=args.get("comparison", "above"),
             metric=args.get("metric", "high"),
@@ -1192,10 +1204,14 @@ class PolybotAgent:
             logger.debug(f"Balance snapshot failed: {e}")
 
     def get_cycle_interval(self) -> int:
-        """Return cycle interval, faster if near-resolution opportunities exist."""
+        """Return cycle interval, faster if near-resolution opportunities exist.
+        Minimum 60s to avoid burning API tokens on empty cycles.
+        """
         if self.has_near_resolution:
-            return self.config.get("near_resolution_interval_seconds", 30)
-        return self.config.get("cycle_interval_seconds", 120)
+            interval = self.config.get("near_resolution_interval_seconds", 60)
+        else:
+            interval = self.config.get("cycle_interval_seconds", 120)
+        return max(60, interval)  # Never go below 60s
 
     def startup_report(self) -> None:
         """Print startup info."""
