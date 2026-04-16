@@ -928,7 +928,20 @@ class PolybotAgent:
                 tier = m.get("tier", "")
                 # Skip noise markets from near-resolution list
                 is_noise = tier == "noise" or any(nk in title_check for nk in noise_keywords)
-                if max_prob >= nr_threshold and days <= 7 and not is_noise:
+                if is_noise:
+                    continue
+                if max_prob >= nr_threshold and days <= 7:
+                    # Skip exact-temp weather markets at extreme prices — LLM always rejects these
+                    # (YES at <5% or NO at >95% on "be X°C" markets = no edge, waste of tokens)
+                    is_weather = any(kw in title_check for kw in ["temperature", "°c", "°f"])
+                    is_exact = (
+                        is_weather and
+                        "or higher" not in title_check and "or below" not in title_check and
+                        "or lower" not in title_check and "or above" not in title_check and
+                        "between" not in title_check and "or more" not in title_check
+                    )
+                    if is_exact and (prob < 5 or prob > 95):
+                        continue  # Cheap YES or expensive NO on exact-temp = no edge
                     near_res_markets.append(m)
 
             if near_res_markets:
@@ -951,14 +964,15 @@ class PolybotAgent:
         if whale_signals:
             reasons.append(f"whale_signals:{len(whale_signals)}")
 
-        # SIM venue: invoke if there are ANY markets at all (we want to trade in SIM)
+        # SIM venue: invoke LLM every 10th cycle even without signals (catch non-weather opportunities)
         if self.config.get("venue", "sim") == "sim" and not reasons:
-            has_markets = any(
-                isinstance(m, dict) and "error" not in m and m.get("id")
-                for m in (markets or [])
-            )
-            if has_markets:
-                reasons.append("sim_markets_available")
+            if self.cycle_count % 10 == 0:
+                has_markets = any(
+                    isinstance(m, dict) and "error" not in m and m.get("id")
+                    for m in (markets or [])
+                )
+                if has_markets:
+                    reasons.append("sim_periodic_scan")
 
         invoke = len(reasons) > 0
         if not invoke:
