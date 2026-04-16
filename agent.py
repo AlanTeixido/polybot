@@ -855,13 +855,23 @@ class PolybotAgent:
             current_ids = {m["id"] for m in markets if "id" in m}
 
             # Near-resolution opportunities (lower threshold for sim venue)
+            # Skip noise-tier markets (crypto exact-price, esports, FDV) — they waste LLM tokens
             venue = self.config.get("venue", "sim")
             nr_threshold = 80 if venue == "sim" else 92
+            noise_keywords = [
+                "up or down", "exact price", "close above", "close below",
+                "fdv above", "fdv below", "market cap", "map 1", "map 2", "map 3",
+                "set 1 winner", "set 2 winner", "will reach", "will hit",
+            ]
             for m in markets:
                 prob = m.get("yes_probability", 50)
                 days = m.get("days_to_resolution", 999)
                 max_prob = max(prob, 100 - prob)
-                if max_prob >= nr_threshold and days <= 7:
+                title_check = (m.get("title", "") or "").lower()
+                tier = m.get("tier", "")
+                # Skip noise markets from near-resolution list
+                is_noise = tier == "noise" or any(nk in title_check for nk in noise_keywords)
+                if max_prob >= nr_threshold and days <= 7 and not is_noise:
                     near_res_markets.append(m)
 
             if near_res_markets:

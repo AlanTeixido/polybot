@@ -6,7 +6,8 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\('agent.py'\\).read\\(\\)\\); print\\('agent.py: OK'\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\('tools/polymarket.py'\\).read\\(\\)\\); print\\('tools/polymarket.py: OK'\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\('tools/weather.py'\\).read\\(\\)\\); print\\('tools/weather.py: OK'\\)\")",
-      "Bash(python -c \"import ast; ast.parse\\(open\\('polybot-weather/bot.py'\\).read\\(\\)\\); print\\('polybot-weather/bot.py: OK'\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\('polybot-weather/bot.py'\\).read\\(\\)\\); print\\('polybot-weather/bot.py: OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('agent.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
     ]
   }
 }
