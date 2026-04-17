@@ -653,17 +653,42 @@ def place_order(
     if side not in ("YES", "NO"):
         return {"error": f"Invalid side: {side}. Must be YES or NO.", "executed": False}
 
-    # --- Entry price gate (all venues including SIM) ---
+    # --- Entry price gate (all venues including SIM) — FAIL SAFE ---
+    # Try multiple sources: detail endpoint, then markets cache fallback
+    entry_price = None
     detail_for_entry = get_market_detail(market_id, venue=venue, simmer_api_key=simmer_api_key)
     if "error" not in detail_for_entry:
-        entry_price = detail_for_entry.get("yes_price", 0.5) if side == "YES" else detail_for_entry.get("no_price", 0.5)
-        max_entry = 0.75 if venue != "sim" else 0.85
-        if entry_price > max_entry:
-            return {
-                "error": f"Entry price {entry_price:.2f} too high (max {max_entry}). "
-                         f"Risk/reward unfavorable — seek cheaper side.",
-                "executed": False,
-            }
+        yp = detail_for_entry.get("yes_price")
+        np = detail_for_entry.get("no_price")
+        # Only trust if prices are not default 0.5 (which means API didn't return data)
+        if yp is not None and np is not None and not (yp == 0.5 and np == 0.5):
+            entry_price = yp if side == "YES" else np
+
+    # Fallback: check the markets cache
+    if entry_price is None and _markets_cache.get("data"):
+        for m in _markets_cache["data"]:
+            if m.get("id") == market_id:
+                yes_prob = m.get("yes_probability", 50) / 100
+                entry_price = yes_prob if side == "YES" else (1 - yes_prob)
+                logger.info(f"Entry gate: using markets cache price {entry_price:.2f}")
+                break
+
+    # If we STILL don't have a price, BLOCK the trade (fail-safe)
+    if entry_price is None:
+        return {
+            "error": "Entry price gate: cannot verify price from any source. "
+                     "Trade blocked for safety.",
+            "executed": False,
+            "gate": "price_unverified",
+        }
+
+    max_entry = 0.75 if venue != "sim" else 0.85
+    if entry_price > max_entry:
+        return {
+            "error": f"Entry price {entry_price:.2f} too high (max {max_entry}). "
+                     f"Risk/reward unfavorable — seek cheaper side.",
+            "executed": False,
+        }
 
     # --- Correlation limit: max 3 positions per city+date ---
     positions = get_positions(wallet_address, venue=venue, simmer_api_key=simmer_api_key)
