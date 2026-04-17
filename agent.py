@@ -623,6 +623,44 @@ def execute_tool(name: str, args: dict, config: dict) -> Any:
             config["_trades_this_cycle"] = trades_this_cycle + 1
             _traded_ids.add(args["market_id"])
             config["_traded_market_ids"] = _traded_ids
+
+            # Log trade for calibration analysis (extract probability from reason text)
+            try:
+                from tools.polymarket import get_market_detail as _gmd_cal
+                _detail_cal = _gmd_cal(args["market_id"], venue=venue, simmer_api_key=simmer_key)
+                _side_cal = args["side"].upper()
+                _market_price = _detail_cal.get("yes_price", 0.5) if _side_cal == "YES" else _detail_cal.get("no_price", 0.5)
+                # Try to parse P_real from reason (LLM usually includes it)
+                import re as _re_cal
+                _reason = args.get("reason", "")
+                _p_match = _re_cal.search(r"P[_ ]?real[=:\s]+([0-9.]+)", _reason, _re_cal.IGNORECASE)
+                _p_yes_real = float(_p_match.group(1)) if _p_match else None
+                if _p_yes_real is not None and _p_yes_real > 1:
+                    _p_yes_real = _p_yes_real / 100
+                _p_predicted = None
+                if _p_yes_real is not None:
+                    _p_predicted = _p_yes_real if _side_cal == "YES" else (1 - _p_yes_real)
+
+                _cal_entry = {
+                    "timestamp": time.time(),
+                    "date": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "market_id": args["market_id"],
+                    "title": args.get("market_title", ""),
+                    "side": _side_cal,
+                    "p_predicted": round(_p_predicted, 4) if _p_predicted is not None else None,
+                    "market_price_entry": round(_market_price, 4),
+                    "p_yes_real": round(_p_yes_real, 4) if _p_yes_real is not None else None,
+                    "amount": args["amount_usdc"],
+                    "venue": venue,
+                    "source": "agent",
+                    "reason": _reason[:200],
+                }
+                _cal_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory", "calibration_log.jsonl")
+                os.makedirs(os.path.dirname(_cal_path), exist_ok=True)
+                with open(_cal_path, "a") as _cf:
+                    _cf.write(json.dumps(_cal_entry, default=str) + "\n")
+            except Exception as _ce:
+                logger.warning(f"Calibration log failed: {_ce}")
         return result
 
     elif name == "get_trade_history":

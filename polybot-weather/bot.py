@@ -761,6 +761,33 @@ class WeatherBot:
                 _ck = f"{opp['city']}|{parse_target_date(opp['title']) or ''}"
                 _city_date_counts[_ck] = _city_date_counts.get(_ck, 0) + 1
                 save_state(self.state)
+
+                # Log trade with predicted probability for calibration analysis
+                try:
+                    _p_side = opp["p_yes_real"] if opp["side"] == "yes" else (1 - opp["p_yes_real"])
+                    _cal_entry = {
+                        "timestamp": time.time(),
+                        "date": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "market_id": opp["market_id"],
+                        "title": opp["title"],
+                        "city": opp["city"],
+                        "side": opp["side"],
+                        "p_predicted": round(_p_side, 4),
+                        "market_price_entry": round(opp["entry_price"], 4),
+                        "p_yes_real": round(opp["p_yes_real"], 4),
+                        "edge": round(opp["edge"], 4),
+                        "amount": bet,
+                        "venue": self.venue,
+                        "comparison": opp["comparison"],
+                        "days_ahead": opp["days_ahead"],
+                        "source": "weather-bot",
+                    }
+                    _cal_path = os.path.join(HERE, "..", "memory", "calibration_log.jsonl")
+                    os.makedirs(os.path.dirname(_cal_path), exist_ok=True)
+                    with open(_cal_path, "a") as _cf:
+                        _cf.write(json.dumps(_cal_entry) + "\n")
+                except Exception as _ce:
+                    logger.warning(f"Calibration log failed: {_ce}")
                 send_telegram(
                     f"*Weather Trade [{self.venue}]*\n{opp['side'].upper()} {bet}{self.currency}\n{opp['title'][:80]}\n"
                     f"Edge: {opp['edge']:+.2f} | P_real: {opp['p_yes_real']} | Price: {opp['market_price']:.2f}",
