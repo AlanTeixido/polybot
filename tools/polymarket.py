@@ -682,7 +682,9 @@ def place_order(
             "gate": "price_unverified",
         }
 
-    max_entry = 0.75 if venue != "sim" else 0.85
+    # Tightened: Polymarket 0.65 (was 0.75), SIM 0.80 (was 0.85)
+    # Forces better risk/reward: at 0.65 entry, win pays 53% vs at 0.95 only 5%
+    max_entry = 0.65 if venue != "sim" else 0.80
     if entry_price > max_entry:
         return {
             "error": f"Entry price {entry_price:.2f} too high (max {max_entry}). "

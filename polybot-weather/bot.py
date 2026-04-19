@@ -526,8 +526,9 @@ def evaluate_market(market: dict, min_edge: float, verbose: bool = False, venue_
     entry_price = current_price if side == "yes" else (1 - current_price)
 
     # Entry price gate: reject trades with terrible risk/reward
-    # Buying at 0.95 = risk $0.95 to gain $0.05 — needs 95% WR to break even
-    max_entry = 0.85 if venue_hint != "polymarket" else 0.75
+    # Tightened: Polymarket 0.65 (was 0.75), SIM 0.80 (was 0.85)
+    # At 0.65 entry, win pays 53% vs at 0.95 only 5% — much better R/R
+    max_entry = 0.80 if venue_hint != "polymarket" else 0.65
     if entry_price > max_entry:
         if verbose:
             logger.info(f"  SKIP (entry {entry_price:.2f} > {max_entry}): {title[:60]}")
