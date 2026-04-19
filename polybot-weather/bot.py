@@ -357,10 +357,15 @@ def estimate_range_probability(
 # Simmer API
 # ---------------------------------------------------------------------------
 def fetch_markets(api_key: str, limit: int = 100) -> list[dict]:
+    """Fetch weather markets from Simmer.
+
+    The default /markets endpoint returns mostly crypto noise. We use the q=temperature
+    query to filter server-side for weather markets only.
+    """
     try:
         resp = SESSION.get(
             f"{SIMMER_API}/markets",
-            params={"limit": limit},
+            params={"limit": limit, "q": "temperature"},
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=REQUEST_TIMEOUT,
         )
