@@ -376,8 +376,38 @@ def fetch_markets(api_key: str, limit: int = 100) -> list[dict]:
         return []
 
 
-def fetch_balance(api_key: str, venue: str = "sim") -> float:
-    """Returns balance for the configured venue (sim $SIM or polymarket USDC)."""
+def fetch_balance(api_key: str, venue: str = "sim", wallet_address: str = "") -> float:
+    """Returns balance for the configured venue.
+
+    For polymarket: reads USDC.e directly from Polygon blockchain (real balance).
+    For sim: returns $SIM balance from Simmer API.
+    """
+    if venue == "polymarket" and wallet_address:
+        # Read real USDC.e balance from Polygon blockchain
+        try:
+            from web3 import Web3
+            USDC = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+            abi = [{"constant": True, "inputs": [{"name": "_owner", "type": "address"}],
+                    "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}],
+                    "type": "function"}]
+            for rpc in ["https://polygon-bor-rpc.publicnode.com",
+                        "https://rpc.ankr.com/polygon",
+                        "https://polygon.llamarpc.com"]:
+                try:
+                    w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 10}))
+                    contract = w3.eth.contract(address=Web3.to_checksum_address(USDC), abi=abi)
+                    raw = contract.functions.balanceOf(Web3.to_checksum_address(wallet_address)).call()
+                    return raw / 1e6  # USDC has 6 decimals
+                except Exception as _e:
+                    logger.debug(f"RPC {rpc} failed: {_e}")
+                    continue
+            logger.error("All Polygon RPCs failed")
+            return -1.0
+        except Exception as e:
+            logger.error(f"fetch_balance (polymarket) failed: {e}")
+            return -1.0
+
+    # Sim venue
     try:
         resp = SESSION.get(
             f"{SIMMER_API}/agents/me",
@@ -385,14 +415,7 @@ def fetch_balance(api_key: str, venue: str = "sim") -> float:
             timeout=REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
-        data = resp.json()
-        if venue == "polymarket":
-            return float(
-                data.get("polymarket_balance")
-                or data.get("polymarket_usdc")
-                or data.get("balance", 0)
-            )
-        return float(data.get("balance", 0))
+        return float(resp.json().get("balance", 0))
     except Exception as e:
         logger.error(f"fetch_balance failed: {e}")
         return -1.0
@@ -666,6 +689,7 @@ class WeatherBot:
         self.running = True
         self.state = load_state()
         self.api_key = config["simmer_api_key"]
+        self.wallet_address = config.get("wallet_address", "")
         self.venue = config.get("venue", "sim")
         self.min_edge = float(config.get("min_edge", 0.15))
         self.max_bet = float(config.get("max_bet", config.get("max_bet_usdc", 50)))
@@ -674,7 +698,7 @@ class WeatherBot:
         self.currency = "USDC" if self.venue == "polymarket" else "$SIM"
 
     def cycle(self) -> None:
-        balance = fetch_balance(self.api_key, venue=self.venue)
+        balance = fetch_balance(self.api_key, venue=self.venue, wallet_address=self.wallet_address)
         # Need at least max_bet to trade — no point evaluating markets if can't afford
         min_balance = self.max_bet * 1.1
         if balance < min_balance:
@@ -858,7 +882,7 @@ class WeatherBot:
         logger.info(f"Cycle interval: {self.cycle_interval}s")
         logger.info("=" * 60)
 
-        bal = fetch_balance(self.api_key, venue=self.venue)
+        bal = fetch_balance(self.api_key, venue=self.venue, wallet_address=self.wallet_address)
         logger.info(f"Starting balance: {bal} {self.currency}")
         send_telegram(
             f"*Weather Bot started* [{self.venue}]\nBalance: {bal} {self.currency}\n"
@@ -895,7 +919,7 @@ class WeatherBot:
 
     def _send_summary(self) -> None:
         """Send periodic Telegram summary with balance + stats."""
-        bal = fetch_balance(self.api_key, venue=self.venue)
+        bal = fetch_balance(self.api_key, venue=self.venue, wallet_address=self.wallet_address)
         wins = self.state.get("wins", 0)
         losses = self.state.get("losses", 0)
         pnl = self.state.get("pnl", 0.0)
