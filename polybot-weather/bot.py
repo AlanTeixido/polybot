@@ -539,6 +539,22 @@ def evaluate_market(market: dict, min_edge: float, verbose: bool = False, venue_
             logger.info(f"  SKIP (entry {entry_price:.2f} > {max_entry}): {title[:60]}")
         return None
 
+    # MIN entry price: reject trades where the side we're buying is too cheap (<5¢)
+    # This usually means the market is already resolved/about to resolve, or the
+    # other side is at >0.95 which means YES/NO is locked in.
+    if entry_price < 0.05:
+        if verbose:
+            logger.info(f"  SKIP (entry {entry_price:.2f} < 0.05, market likely resolving): {title[:60]}")
+        return None
+
+    # MARKET PRICE EXTREMES: skip markets at 0.99+ or 0.01- on the OPPOSITE side
+    # If market_price (YES) is 1.00, market thinks YES is certain. Even if our
+    # forecast disagrees, this is usually a sign the market is already settling.
+    if current_price >= 0.99 or current_price <= 0.01:
+        if verbose:
+            logger.info(f"  SKIP (market extreme {current_price:.2f}, likely resolving): {title[:60]}")
+        return None
+
     return {
         "market_id": market_id,
         "title": title,
