@@ -675,10 +675,15 @@ class WeatherBot:
 
     def cycle(self) -> None:
         balance = fetch_balance(self.api_key, venue=self.venue)
-        min_balance = 1 if self.venue == "polymarket" else 10
+        # Need at least max_bet to trade — no point evaluating markets if can't afford
+        min_balance = self.max_bet * 1.1
         if balance < min_balance:
-            logger.warning(f"Balance too low: {balance} {self.currency}. Skipping cycle.")
+            # Log only every 30 cycles to avoid spam
+            if getattr(self, "_low_balance_count", 0) % 30 == 0:
+                logger.warning(f"Balance too low: {balance:.2f} {self.currency} (need {min_balance:.2f}). Skipping cycles.")
+            self._low_balance_count = getattr(self, "_low_balance_count", 0) + 1
             return
+        self._low_balance_count = 0
 
         markets = fetch_markets(self.api_key, limit=100)
         if not markets:
@@ -727,9 +732,12 @@ class WeatherBot:
         # Evaluate each
         opportunities = []
         max_correlated = 3
+        failed_set = set(self.state.get("failed_markets", []))
         for m in weather_markets:
             if m.get("id") in self.state.get("traded_markets", []):
                 continue  # already traded this market
+            if m.get("id") in failed_set:
+                continue  # already failed, don't retry
             decision = evaluate_market(m, self.min_edge, verbose=verbose, venue_hint=self.venue)
             if decision:
                 # Check correlation limit
@@ -819,10 +827,20 @@ class WeatherBot:
             else:
                 err = result.get("error", "unknown")
                 logger.error(f"Trade failed: {err}")
-                # Hard stop if first real trade fails — fix before losing money
-                if self.venue == "polymarket":
+
+                # Add to "do not retry" cache so bot doesn't loop on same failed trade
+                self.state.setdefault("failed_markets", []).append(opp["market_id"])
+                save_state(self.state)
+
+                # Only notify on REAL errors (not insufficient balance / known issues)
+                err_lower = err.lower()
+                is_silent = any(kw in err_lower for kw in [
+                    "insufficient balance", "not enough", "too high", "correlation",
+                    "already", "spread too high", "no stacking",
+                ])
+                if self.venue == "polymarket" and not is_silent:
                     send_telegram(
-                        f"*Weather Trade FAILED [{self.venue}]*\n{opp['title'][:80]}\nError: {err[:200]}",
+                        f"⚠️ *Trade FAILED*\n{opp['title'][:80]}\n{err[:150]}",
                         self.config,
                     )
 
@@ -841,6 +859,7 @@ class WeatherBot:
             self.config,
         )
 
+        last_summary_hour = ""
         while self.running:
             try:
                 self.cycle()
@@ -849,6 +868,16 @@ class WeatherBot:
                 time.sleep(30)
                 continue
 
+            # Periodic summary every 6 hours (00, 06, 12, 18 UTC)
+            current_hour = time.strftime("%Y-%m-%d-%H", time.gmtime())
+            hour_int = int(time.strftime("%H", time.gmtime()))
+            if current_hour != last_summary_hour and hour_int % 6 == 0:
+                try:
+                    self._send_summary()
+                    last_summary_hour = current_hour
+                except Exception as e:
+                    logger.warning(f"Summary failed: {e}")
+
             for _ in range(self.cycle_interval):
                 if not self.running:
                     break
@@ -856,6 +885,23 @@ class WeatherBot:
 
         logger.info("Weather bot stopped")
         send_telegram("*Weather Bot stopped*", self.config)
+
+    def _send_summary(self) -> None:
+        """Send periodic Telegram summary with balance + stats."""
+        bal = fetch_balance(self.api_key, venue=self.venue)
+        wins = self.state.get("wins", 0)
+        losses = self.state.get("losses", 0)
+        pnl = self.state.get("pnl", 0.0)
+        total = self.state.get("total_trades", 0)
+        wr = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
+        msg = (
+            f"📊 *Weather Bot Summary*\n"
+            f"Balance: {bal:.2f} {self.currency}\n"
+            f"Total trades: {total}\n"
+            f"Wins/Losses: {wins}W / {losses}L (WR: {wr:.0f}%)\n"
+            f"PnL: {pnl:+.2f} {self.currency}"
+        )
+        send_telegram(msg, self.config)
 
 
 def main() -> None:
