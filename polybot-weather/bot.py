@@ -828,15 +828,22 @@ class WeatherBot:
                 err = result.get("error", "unknown")
                 logger.error(f"Trade failed: {err}")
 
-                # Add to "do not retry" cache so bot doesn't loop on same failed trade
-                self.state.setdefault("failed_markets", []).append(opp["market_id"])
-                save_state(self.state)
-
-                # Only notify on REAL errors (not insufficient balance / known issues)
                 err_lower = err.lower()
-                is_silent = any(kw in err_lower for kw in [
-                    "insufficient balance", "not enough", "too high", "correlation",
-                    "already", "spread too high", "no stacking",
+                is_network = any(kw in err_lower for kw in [
+                    "timed out", "timeout", "connection", "httpsconnectionpool",
+                    "read timed out", "max retries", "connection reset",
+                    "503", "502", "504", "gateway",
+                ])
+                is_balance = "insufficient balance" in err_lower or "not enough" in err_lower
+
+                # Only add to "do not retry" if it's a permanent error (not network/balance)
+                if not is_network and not is_balance:
+                    self.state.setdefault("failed_markets", []).append(opp["market_id"])
+                    save_state(self.state)
+
+                # Only notify on REAL errors
+                is_silent = is_network or is_balance or any(kw in err_lower for kw in [
+                    "too high", "correlation", "already", "spread too high", "no stacking",
                 ])
                 if self.venue == "polymarket" and not is_silent:
                     send_telegram(
