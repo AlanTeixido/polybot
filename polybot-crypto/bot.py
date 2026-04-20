@@ -199,13 +199,15 @@ def compute_fair_probability(klines: list[dict], spot: float) -> float:
     return p_up
 
 
-def evaluate_market(market: dict, config: dict) -> dict | None:
+def evaluate_market(market: dict, config: dict, verbose: bool = False) -> dict | None:
     """Decide whether to trade this market."""
     title = market.get("title", market.get("question", ""))
     market_id = market.get("market_id", market.get("id", ""))
 
     parsed = parse_end_time(title)
     if not parsed:
+        if verbose:
+            logger.info(f"  SKIP (title parse fail): {title[:80]}")
         return None
     asset, end_utc = parsed
 
@@ -213,17 +215,25 @@ def evaluate_market(market: dict, config: dict) -> dict | None:
     now = datetime.now(timezone.utc)
     seconds_to_end = (end_utc - now).total_seconds()
     if seconds_to_end < 60 or seconds_to_end > 900:
+        if verbose:
+            logger.info(f"  SKIP (window {seconds_to_end:.0f}s out of [60,900]): {title[:80]}")
         return None
 
     symbol = ASSET_TO_BINANCE.get(asset)
     if not symbol:
+        if verbose:
+            logger.info(f"  SKIP (no binance mapping for {asset}): {title[:80]}")
         return None
 
     spot = fetch_spot_price(symbol)
     if spot is None:
+        if verbose:
+            logger.info(f"  SKIP (spot fetch fail {symbol}): {title[:80]}")
         return None
     klines = fetch_klines(symbol, "1m", 10)
     if not klines or len(klines) < 5:
+        if verbose:
+            logger.info(f"  SKIP (klines fetch fail {symbol}): {title[:80]}")
         return None
 
     p_fair = compute_fair_probability(klines, spot)
@@ -231,6 +241,8 @@ def evaluate_market(market: dict, config: dict) -> dict | None:
     # Get current market prices
     detail = get_market_detail(market_id, venue="sim", simmer_api_key=config["simmer_api_key"])
     if "error" in detail:
+        if verbose:
+            logger.info(f"  SKIP (detail error): {title[:80]}")
         return None
     yes_price = detail.get("yes_price", 0.5)
     no_price = detail.get("no_price", 0.5)
@@ -241,6 +253,13 @@ def evaluate_market(market: dict, config: dict) -> dict | None:
 
     min_edge = config.get("min_edge", 0.15)
     max_entry = config.get("max_entry", 0.50)
+
+    if verbose:
+        logger.info(
+            f"  {asset} {seconds_to_end:.0f}s: spot={spot:.2f} P_fair={p_fair:.2f} "
+            f"yes={yes_price:.2f} no={no_price:.2f} "
+            f"edge_yes={edge_yes:+.2f} edge_no={edge_no:+.2f}"
+        )
 
     # Pick best side
     if edge_yes > min_edge and yes_price <= max_entry:
@@ -373,9 +392,10 @@ def cycle(config: dict, state: dict, cycle_num: int) -> None:
     logger.info(f"Cycle {cycle_num}: {len(candidates)} candidate crypto markets, balance={balance:.0f} $SIM")
 
     # Evaluate each
+    verbose = (cycle_num % 5 == 1)  # verbose every 5 cycles
     opps = []
     for m in candidates[:30]:  # cap to avoid rate limits
-        dec = evaluate_market(m, config)
+        dec = evaluate_market(m, config, verbose=verbose)
         if dec:
             opps.append(dec)
 
