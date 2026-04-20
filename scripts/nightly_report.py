@@ -32,6 +32,13 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 PENDING_THRESHOLD_SECS = 96 * 3600
 # Trades truly unresolved after 7 days warrant investigation.
 STUCK_THRESHOLD_SECS = 168 * 3600
+
+# 2026-04-20 11:23 UTC: weather model recalibrated.
+# - std_dev: max(1.5, 1+d*0.4) → max(2.5, 1.5+d*0.5)
+# - equal markets paused
+# Trades older than this used the broken model and pollute aggregate metrics.
+FIX_TIMESTAMP_WEATHER = 1776684180
+
 NOW = time.time()
 
 
@@ -254,6 +261,32 @@ def _isnan(x) -> bool:
     return x != x
 
 
+def _calibration_buckets(resolved: list[dict]) -> list[str]:
+    """Return bucket lines like '  p≥0.95: N=4 pred=0.98 real=0.50 gap=+0.48 🚨'."""
+    buckets = [
+        (0.95, 1.01, "p≥0.95"),
+        (0.80, 0.95, "p 0.80-0.95"),
+        (0.60, 0.80, "p 0.60-0.80"),
+        (0.40, 0.60, "p 0.40-0.60"),
+        (0.0, 0.40, "p<0.40"),
+    ]
+    out = []
+    for lo, hi, label in buckets:
+        sub = [t for t in resolved if lo <= t.get("p_predicted", 0) < hi]
+        if not sub:
+            continue
+        n = len(sub)
+        avg_p = sum(t["p_predicted"] for t in sub) / n
+        real = sum(t["actual_won"] for t in sub) / n
+        gap = avg_p - real
+        warn = " 🚨" if abs(gap) > 0.30 else (" ⚠️" if abs(gap) > 0.15 else "")
+        n_warn = " (N bajo)" if n < 3 else ""
+        out.append(
+            f"  {label}: N={n} pred={avg_p:.2f} real={real:.2f} gap={gap:+.2f}{warn}{n_warn}"
+        )
+    return out
+
+
 def section_for_bot(
     name: str,
     log_path: str,
@@ -298,40 +331,59 @@ def section_for_bot(
     lines.append(
         f"  Total: {n_total}t  ({n_res} resueltos, {n_young} pendientes{stuck_marker})"
     )
-    if n_res > 0:
+
+    is_weather = "WEATHER" in name.upper()
+
+    if is_weather and n_res > 0:
+        # Split weather trades by fix timestamp to avoid mixing broken-σ trades
+        # with post-recalibration trades. Aggregate metrics + go/no-go still
+        # use the full set; this split is for diagnostic visibility.
+        pre = [t for t in resolved if t.get("timestamp", 0) < FIX_TIMESTAMP_WEATHER]
+        post = [t for t in resolved if t.get("timestamp", 0) >= FIX_TIMESTAMP_WEATHER]
+
+        def _format_subblock(label: str, subset: list[dict]) -> list[str]:
+            sub_lines = [f"  {label}:"]
+            n = len(subset)
+            if n == 0:
+                sub_lines.append("    N=0 (aún no hay trades resueltos con este modelo)")
+                return sub_lines
+            sub_wr = wr(subset)
+            sub_brier = brier(subset)
+            sub_pnl = pnl(subset)
+            sub_avg = avg_predicted(subset)
+            sub_drift = abs(sub_avg - sub_wr) if not _isnan(sub_wr) else float("nan")
+            sign = "+" if sub_pnl >= 0 else ""
+            drift_s = f"{sub_drift*100:.0f}%" if not _isnan(sub_drift) else "—"
+            sub_lines.append(
+                f"    N={n} WR {sub_wr*100:.0f}% Brier {sub_brier:.2f} "
+                f"P&L {sign}{sub_pnl:.1f}{currency} drift {drift_s}"
+            )
+            if n < 3:
+                sub_lines.append("    N insuficiente para buckets")
+            else:
+                bucket_lines = _calibration_buckets(subset)
+                if bucket_lines:
+                    sub_lines.append("    Calibración por bucket:")
+                    sub_lines.extend([f"  {bl}" for bl in bucket_lines])
+            return sub_lines
+
+        from datetime import datetime as _dt, timezone as _tz
+        fix_dt = _dt.fromtimestamp(FIX_TIMESTAMP_WEATHER, _tz.utc).strftime("%Y-%m-%d %H:%M UTC")
+        lines.extend(_format_subblock(f"Pre-fix (σ viejo, <{fix_dt})", pre))
+        lines.extend(_format_subblock(f"Post-fix (σ nuevo, ≥{fix_dt})", post))
+    elif n_res > 0:
+        # Crypto / non-weather: single aggregate block as before
         sign = "+" if overall_pnl >= 0 else ""
         drift_str = f"{drift*100:.0f}%" if not _isnan(drift) else "—"
         lines.append(
             f"  Resueltos: WR {overall_wr*100:.0f}% Brier {overall_brier:.2f} "
             f"P&L {sign}{overall_pnl:.1f}{currency} | drift {drift_str}"
         )
-
-    # Calibration buckets — confirms WHY drift exists (which p ranges miscalibrate)
-    if n_res >= 3:
-        buckets = [
-            (0.95, 1.01, "p≥0.95"),
-            (0.80, 0.95, "p 0.80-0.95"),
-            (0.60, 0.80, "p 0.60-0.80"),
-            (0.40, 0.60, "p 0.40-0.60"),
-            (0.0, 0.40, "p<0.40"),
-        ]
-        bucket_lines = []
-        for lo, hi, label in buckets:
-            sub = [t for t in resolved if lo <= t.get("p_predicted", 0) < hi]
-            if not sub:
-                continue
-            n = len(sub)
-            avg_p = sum(t["p_predicted"] for t in sub) / n
-            real = sum(t["actual_won"] for t in sub) / n
-            gap = avg_p - real
-            warn = " 🚨" if abs(gap) > 0.30 else (" ⚠️" if abs(gap) > 0.15 else "")
-            n_warn = " (N bajo)" if n < 3 else ""
-            bucket_lines.append(
-                f"    {label}: N={n} pred={avg_p:.2f} real={real:.2f} gap={gap:+.2f}{warn}{n_warn}"
-            )
-        if bucket_lines:
-            lines.append("  Calibración por bucket:")
-            lines.extend(bucket_lines)
+        if n_res >= 3:
+            bucket_lines = _calibration_buckets(resolved)
+            if bucket_lines:
+                lines.append("  Calibración por bucket:")
+                lines.extend(bucket_lines)
 
     # Per-group breakdown
     groups: dict[str, list[dict]] = defaultdict(list)
