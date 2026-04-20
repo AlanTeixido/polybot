@@ -221,13 +221,25 @@ def evaluate_market(market: dict, config: dict, verbose: bool = False) -> dict |
         return None
     asset, end_utc = parsed
 
-    # Window: only trade if market ends in [60s, 15min] from now
+    # Window: only trade if market ends in [180s, 15min] from now
+    # Lower bound 180s: markets near close have outcome mostly decided — our
+    # momentum model is unreliable and "cheap" NO/YES prices reflect real info.
     now = datetime.now(timezone.utc)
     seconds_to_end = (end_utc - now).total_seconds()
-    if seconds_to_end < 60 or seconds_to_end > 900:
+    if seconds_to_end < 180 or seconds_to_end > 900:
         if verbose:
-            logger.info(f"  SKIP (window {seconds_to_end:.0f}s out of [60,900]): {title[:80]}")
+            logger.info(f"  SKIP (window {seconds_to_end:.0f}s out of [180,900]): {title[:80]}")
         return None
+
+    # Extra guard: if market is already extreme (>95¢ either side), outcome is
+    # effectively resolved. Don't chase "edge" that is really the market being right.
+    yes_prob_raw_check = market.get("yes_probability")
+    if yes_prob_raw_check is not None:
+        yes_px_check = float(yes_prob_raw_check) / 100.0 if yes_prob_raw_check > 1 else float(yes_prob_raw_check)
+        if yes_px_check >= 0.95 or yes_px_check <= 0.05:
+            if verbose:
+                logger.info(f"  SKIP (extreme market {yes_px_check:.2f}, already decided): {title[:80]}")
+            return None
 
     symbol = ASSET_TO_BINANCE.get(asset)
     if not symbol:
