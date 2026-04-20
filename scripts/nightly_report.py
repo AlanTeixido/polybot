@@ -303,7 +303,8 @@ def section_for_bot(
 
     return "\n".join(lines), {
         "n_resolved": n_res,
-        "n_pending": n_pend,
+        "n_pending_young": n_young,
+        "n_pending_stuck": n_stuck,
         "wr": overall_wr,
         "brier": overall_brier,
         "pnl": overall_pnl,
