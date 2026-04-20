@@ -227,10 +227,25 @@ def _isnan(x) -> bool:
 
 
 def section_for_bot(
-    name: str, log_path: str, group_field: str, currency: str, api_key: str, window_secs: float
+    name: str,
+    log_path: str,
+    group_field: str,
+    currency: str,
+    api_key: str,
+    window_secs: float,
+    source_filter: str | None = None,
 ) -> tuple[str, dict]:
-    """Build report section + return summary dict for go/no-go logic."""
-    trades = filter_window(load_log(log_path), window_secs)
+    """Build report section + return summary dict for go/no-go logic.
+
+    source_filter: only count trades whose 'source' field matches (e.g. 'weather-bot').
+    Without this, the shared calibration_log.jsonl mixes legacy agent.py trades
+    with current weather-bot trades.
+    """
+    all_trades = filter_window(load_log(log_path), window_secs)
+    if source_filter:
+        trades = [t for t in all_trades if t.get("source") == source_filter]
+    else:
+        trades = all_trades
     resolved, pending = resolve_trades(trades, api_key)
 
     n_total = len(trades)
@@ -352,15 +367,18 @@ def main() -> None:
             f"📊 Polybot Status — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
         ]
 
-        # Per-window sections
+        # Per-window sections.
+        # Filter by source to exclude legacy agent.py trades from shared log.
         decision_data = {}
         for label, secs in windows:
             report_lines.append(f"\n━━━━━ Ventana {label} ━━━━━")
             w_section, w_summary = section_for_bot(
-                "WEATHER (Polymarket)", WEATHER_LOG, "comparison", "$", api_key, secs
+                "WEATHER (Polymarket)", WEATHER_LOG, "comparison", "$", api_key, secs,
+                source_filter="weather-bot",
             )
             c_section, c_summary = section_for_bot(
-                "CRYPTO (SIM)", CRYPTO_LOG, "asset", "S", api_key, secs
+                "CRYPTO (SIM)", CRYPTO_LOG, "asset", "S", api_key, secs,
+                source_filter="crypto-bot",
             )
             report_lines.append(w_section)
             report_lines.append(c_section)
