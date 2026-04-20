@@ -19,7 +19,12 @@
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
       "Bash(git push *)",
-      "WebFetch(domain:www.simmer.markets)"
+      "WebFetch(domain:www.simmer.markets)",
+      "Bash(python -c \"import sys; sys.path.insert\\(0,'.'\\); from polybot_crypto import bot\")",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('c:/Users/alan.teixido/Desktop/claude/polybot/polybot-crypto/bot.py'\\).read\\(\\)\\); print\\('OK: syntax valid'\\)\")",
+      "Bash(git check-ignore *)",
+      "Bash(git commit *)"
     ]
   }
 }
