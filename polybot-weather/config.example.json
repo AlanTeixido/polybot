@@ -3,7 +3,7 @@
   "telegram_bot_token": "",
   "telegram_chat_id": "",
   "dry_run": false,
-  "min_edge": 0.15,
+  "min_edge": 0.20,
   "max_bet": 50,
   "max_pct_balance": 0.02,
   "cycle_interval_seconds": 180,

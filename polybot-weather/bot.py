@@ -554,9 +554,9 @@ def evaluate_market(market: dict, min_edge: float, verbose: bool = False, venue_
     entry_price = current_price if side == "yes" else (1 - current_price)
 
     # Entry price gate: reject trades with terrible risk/reward
-    # Tightened: Polymarket 0.65 (was 0.75), SIM 0.80 (was 0.85)
-    # At 0.65 entry, win pays 53% vs at 0.95 only 5% — much better R/R
-    max_entry = 0.80 if venue_hint != "polymarket" else 0.65
+    # Polymarket 0.55: win pays 82% per trade, break-even WR = 55% (vs current 72%)
+    # SIM 0.75: more relaxed since SIM is virtual
+    max_entry = 0.75 if venue_hint != "polymarket" else 0.55
     if entry_price > max_entry:
         if verbose:
             logger.info(f"  SKIP (entry {entry_price:.2f} > {max_entry}): {title[:60]}")
@@ -691,7 +691,7 @@ class WeatherBot:
         self.api_key = config["simmer_api_key"]
         self.wallet_address = config.get("wallet_address", "")
         self.venue = config.get("venue", "sim")
-        self.min_edge = float(config.get("min_edge", 0.15))
+        self.min_edge = float(config.get("min_edge", 0.20))
         self.max_bet = float(config.get("max_bet", config.get("max_bet_usdc", 50)))
         self.dry_run = config.get("dry_run", False)
         self.cycle_interval = int(config.get("cycle_interval_seconds", 180))
