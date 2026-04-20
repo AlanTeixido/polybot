@@ -24,6 +24,7 @@ CRYPTO_LOG = os.path.join(ROOT, "memory", "crypto_calibration_log.jsonl")
 WEATHER_CONFIG = os.path.join(ROOT, "polybot-weather", "config.json")
 LOCK_FILE = "/tmp/polybot_nightly_report.lock"
 SIMMER_API = "https://api.simmer.markets/api/sdk"
+GAMMA_API = "https://gamma-api.polymarket.com"
 
 # Trades younger than this many seconds are considered pending (not yet resolvable)
 PENDING_THRESHOLD_SECS = 48 * 3600
@@ -82,7 +83,7 @@ def filter_window(trades: list[dict], window_secs: float) -> list[dict]:
     return [t for t in trades if t.get("timestamp", 0) >= cutoff]
 
 
-def fetch_resolution(market_id: str, api_key: str) -> dict | None:
+def fetch_resolution_simmer(market_id: str, api_key: str) -> dict | None:
     """Returns {'resolved': bool, 'winner': 'YES'|'NO'} or None on error."""
     try:
         r = requests.get(
@@ -109,19 +110,59 @@ def fetch_resolution(market_id: str, api_key: str) -> dict | None:
         return None
 
 
+def fetch_resolution_polymarket(market_id: str) -> dict | None:
+    """Polymarket Gamma API — outcomePrices = ['1','0'] (YES won) or ['0','1'] (NO won)."""
+    try:
+        r = requests.get(f"{GAMMA_API}/markets/{market_id}", timeout=10)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        closed = bool(data.get("closed", False))
+        uma_status = (data.get("umaResolutionStatus") or "").lower()
+        if not (closed or uma_status in ("resolved", "settled")):
+            return {"resolved": False}
+        outcome_prices = data.get("outcomePrices", "")
+        prices = []
+        if isinstance(outcome_prices, str) and outcome_prices:
+            try:
+                prices = [float(p) for p in json.loads(outcome_prices)]
+            except (json.JSONDecodeError, ValueError):
+                pass
+        elif isinstance(outcome_prices, list):
+            prices = [float(p) for p in outcome_prices]
+        if len(prices) >= 2:
+            # outcomes is typically ["Yes", "No"], so prices[0] = YES, prices[1] = NO
+            if prices[0] >= 0.99:
+                return {"resolved": True, "winner": "YES"}
+            if prices[1] >= 0.99:
+                return {"resolved": True, "winner": "NO"}
+        return {"resolved": False}
+    except Exception:
+        return None
+
+
+def fetch_resolution(market_id: str, venue: str, api_key: str) -> dict | None:
+    """Route to correct API based on venue."""
+    if venue == "polymarket":
+        return fetch_resolution_polymarket(market_id)
+    return fetch_resolution_simmer(market_id, api_key)
+
+
 def resolve_trades(trades: list[dict], api_key: str) -> tuple[list[dict], list[dict]]:
     """Split into resolved + pending. Trades younger than 48h are always pending."""
     resolved, pending = [], []
-    cache: dict[str, dict | None] = {}
+    cache: dict[tuple[str, str], dict | None] = {}
     for t in trades:
         age = NOW - t.get("timestamp", NOW)
         if age < PENDING_THRESHOLD_SECS:
             pending.append(t)
             continue
         mid = t.get("market_id", "")
-        if mid not in cache:
-            cache[mid] = fetch_resolution(mid, api_key)
-        res = cache[mid]
+        venue = t.get("venue", "sim")
+        key = (venue, mid)
+        if key not in cache:
+            cache[key] = fetch_resolution(mid, venue, api_key)
+        res = cache[key]
         if res and res.get("resolved"):
             won = 1 if res["winner"] == t.get("side", "").upper() else 0
             resolved.append({**t, "actual_won": won})
@@ -149,10 +190,17 @@ def avg_predicted(resolved: list[dict]) -> float:
 
 
 def pnl(resolved: list[dict]) -> float:
-    """Realized P&L. Each share pays $1 on win, $0 on loss; cost = entry_price * shares."""
+    """Realized P&L. Each share pays $1 on win, $0 on loss; cost = entry_price * shares.
+
+    Fail-loud: skip trades without an entry price field rather than defaulting to 0.5
+    which would silently corrupt P&L. Prints WARN so missing schema is noticed.
+    """
     total = 0.0
     for t in resolved:
-        entry = t.get("market_price_entry") or t.get("entry_price") or 0.5
+        entry = t.get("market_price_entry") or t.get("entry_price") or t.get("market_price")
+        if entry is None:
+            print(f"WARN: trade {t.get('market_id', '?')[:12]} has no entry-price field — skipped from P&L")
+            continue
         amt = t.get("amount", 0)
         if entry <= 0 or entry >= 1:
             continue
@@ -258,15 +306,19 @@ def send_telegram(msg: str, config: dict) -> None:
         print("Telegram not configured. Printing instead:")
         print(msg)
         return
-    # Telegram limit ~4096 chars
+    # Telegram limit ~4096 chars. No parse_mode — `_` in field names like
+    # 'above_or_equal' would break Markdown parsing and the entire message
+    # would be silently rejected with HTTP 400.
     chunks = [msg[i:i + 4000] for i in range(0, len(msg), 4000)]
     for chunk in chunks:
         try:
-            requests.post(
+            r = requests.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat_id, "text": chunk, "parse_mode": "Markdown"},
+                json={"chat_id": chat_id, "text": chunk},
                 timeout=10,
             )
+            if r.status_code != 200:
+                print(f"Telegram returned {r.status_code}: {r.text[:200]}")
         except Exception as e:
             print(f"Telegram send failed: {e}")
 
@@ -297,7 +349,7 @@ def main() -> None:
             windows.append(("7d", 7 * 24 * 3600))
 
         report_lines = [
-            f"📊 *Polybot Status* — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+            f"📊 Polybot Status — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
         ]
 
         # Per-window sections
