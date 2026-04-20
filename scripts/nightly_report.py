@@ -84,7 +84,13 @@ def filter_window(trades: list[dict], window_secs: float) -> list[dict]:
 
 
 def fetch_resolution_simmer(market_id: str, api_key: str) -> dict | None:
-    """Returns {'resolved': bool, 'winner': 'YES'|'NO'} or None on error."""
+    """Returns {'resolved': bool, 'winner': 'YES'|'NO'} or None on error.
+
+    Simmer wraps the market in a 'market' key. The 'outcome' field is a
+    boolean (true=YES won, false=NO won), so we MUST use 'in' checks
+    rather than `data.get('outcome') or ...` which would short-circuit
+    on False.
+    """
     try:
         r = requests.get(
             f"{SIMMER_API}/markets/{market_id}",
@@ -93,18 +99,22 @@ def fetch_resolution_simmer(market_id: str, api_key: str) -> dict | None:
         )
         if r.status_code != 200:
             return None
-        data = r.json()
+        body = r.json()
+        # Unwrap: Simmer returns {"market": {...}, "agent_id": "..."}
+        data = body.get("market", body) if isinstance(body, dict) else {}
         status = (data.get("status") or "").lower()
-        outcome = data.get("outcome") or data.get("resolution")
-        if status in ("resolved", "closed", "settled") or outcome is not None:
+        has_outcome = "outcome" in data and data["outcome"] is not None
+        outcome = data.get("outcome") if has_outcome else None
+
+        if status in ("resolved", "closed", "settled") or has_outcome:
+            if isinstance(outcome, bool):
+                return {"resolved": True, "winner": "YES" if outcome else "NO"}
             if isinstance(outcome, str):
                 lo = outcome.lower()
                 if lo in ("yes", "y", "true", "1"):
                     return {"resolved": True, "winner": "YES"}
                 if lo in ("no", "n", "false", "0"):
                     return {"resolved": True, "winner": "NO"}
-            elif isinstance(outcome, bool):
-                return {"resolved": True, "winner": "YES" if outcome else "NO"}
         return {"resolved": False}
     except Exception:
         return None
@@ -142,9 +152,14 @@ def fetch_resolution_polymarket(market_id: str) -> dict | None:
 
 
 def fetch_resolution(market_id: str, venue: str, api_key: str) -> dict | None:
-    """Route to correct API based on venue."""
-    if venue == "polymarket":
-        return fetch_resolution_polymarket(market_id)
+    """Always resolve via Simmer.
+
+    The weather bot trades real Polymarket markets via Simmer's SDK wrapper,
+    which means market_ids stored in our log are Simmer UUIDs (not Polymarket
+    numeric IDs / condition_ids). Simmer proxies resolution data for the
+    Polymarket markets it imports, so its endpoint returns the truth for both
+    SIM and Polymarket-via-Simmer trades.
+    """
     return fetch_resolution_simmer(market_id, api_key)
 
 
