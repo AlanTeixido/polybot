@@ -386,7 +386,8 @@ def fetch_balance(api_key: str, venue: str = "sim", wallet_address: str = "") ->
         # Read real USDC.e balance from Polygon blockchain
         try:
             from web3 import Web3
-            USDC = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+            # USDC.e bridged (Polymarket uses this), NOT native USDC (0x3c499c...)
+            USDC = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
             abi = [{"constant": True, "inputs": [{"name": "_owner", "type": "address"}],
                     "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}],
                     "type": "function"}]
