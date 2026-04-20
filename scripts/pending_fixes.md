@@ -2,6 +2,21 @@
 
 Pre-approval review document. **Do NOT apply** any fix here without explicit user OK.
 
+## DIAG-1 RESULT (2026-04-20): NO BUG. FIX-1 NOT NEEDED.
+
+Diagnostic ran. Found 2 trades in last 48h with entry > 0.55:
+- Chengdu 30°C NO @ 0.5545 (age 43h, entered ~2026-04-19 17:00 UTC)
+- Miami 74-75°F NO @ 0.64 (age 42h, entered ~2026-04-19 18:00 UTC)
+
+Both entered when max_entry was still 0.75/0.65 (before today's tightening
+to 0.55 at 11:23 UTC). They are NOT gate bypasses — they are trades
+executed under valid prior rules.
+
+The 7 dashboard positions at 98-99¢ are older legacy from before the
+get_market_detail bug fix. Calibration log shows them with
+market_price_entry=0.5 (what the bot believed) while the SDK actually
+executed at the real 99¢ price. **DIAG-2 below addresses this**.
+
 ---
 
 ## DIAG-1: Verify whether max_entry=0.55 gate is actually being bypassed
