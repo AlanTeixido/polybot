@@ -350,7 +350,7 @@ def cycle(config: dict, state: dict, cycle_num: int) -> None:
 
     # Fetch all markets, filter crypto Up/Down
     markets = get_markets(
-        query="up or down",
+        keyword="up or down",
         limit=100,
         simmer_api_key=config["simmer_api_key"],
         venue="sim",
