@@ -26,8 +26,12 @@ LOCK_FILE = "/tmp/polybot_nightly_report.lock"
 SIMMER_API = "https://api.simmer.markets/api/sdk"
 GAMMA_API = "https://gamma-api.polymarket.com"
 
-# Trades younger than this many seconds are considered pending (not yet resolvable)
-PENDING_THRESHOLD_SECS = 48 * 3600
+# Weather markets typically resolve 1-2 days after the target day. A trade
+# entered 3 days before target is ~5 days total lifecycle. 48h was too tight
+# and produced false "stuck" alarms. 96h matches realistic resolution timing.
+PENDING_THRESHOLD_SECS = 96 * 3600
+# Trades truly unresolved after 7 days warrant investigation.
+STUCK_THRESHOLD_SECS = 168 * 3600
 NOW = time.time()
 
 
@@ -166,11 +170,15 @@ def fetch_resolution(market_id: str, venue: str, api_key: str) -> dict | None:
 def resolve_trades(
     trades: list[dict], api_key: str
 ) -> tuple[list[dict], list[dict], list[dict]]:
-    """Split into resolved, pending_young (<48h), and pending_unresolved (>48h but API
-    couldn't confirm resolution — either still open on the venue or API failure).
-    Returning three buckets makes it visible when a >48h trade is silently stuck.
+    """Split into three buckets:
+    - resolved: venue confirms an outcome
+    - pending_young: age < 96h, resolution still plausible in-window
+    - pending_stuck: age >= 168h (7d) AND still unresolved → real alarm
+    Trades 96h-168h old that aren't resolved are grouped with pending_young
+    because weather markets with future target dates can legitimately stay
+    open that long (e.g. trade entered 4d before the target day).
     """
-    resolved, pending_young, pending_unresolved = [], [], []
+    resolved, pending_young, pending_stuck = [], [], []
     cache: dict[tuple[str, str], dict | None] = {}
     for t in trades:
         age = NOW - t.get("timestamp", NOW)
@@ -186,9 +194,12 @@ def resolve_trades(
         if res and res.get("resolved"):
             won = 1 if res["winner"] == t.get("side", "").upper() else 0
             resolved.append({**t, "actual_won": won})
+        elif age >= STUCK_THRESHOLD_SECS:
+            pending_stuck.append(t)
         else:
-            pending_unresolved.append(t)
-    return resolved, pending_young, pending_unresolved
+            # >96h but <168h and not yet resolved — still normal for weather markets
+            pending_young.append(t)
+    return resolved, pending_young, pending_stuck
 
 
 def brier(resolved: list[dict]) -> float:
@@ -266,12 +277,18 @@ def section_for_bot(
         trades = [t for t in all_trades if t.get("source") == source_filter]
     else:
         trades = all_trades
-    resolved, pending_young, pending_unresolved = resolve_trades(trades, api_key)
+    resolved, pending_young, pending_stuck = resolve_trades(trades, api_key)
+
+    # Null guard: warn about trades with missing p_predicted (would break Brier math)
+    null_preds = [t for t in resolved if t.get("p_predicted") is None]
+    if null_preds:
+        print(f"WARN: {len(null_preds)} resolved trade(s) have p_predicted=null — excluded from metrics")
+        resolved = [t for t in resolved if t.get("p_predicted") is not None]
 
     n_total = len(trades)
     n_res = len(resolved)
     n_young = len(pending_young)
-    n_stuck = len(pending_unresolved)
+    n_stuck = len(pending_stuck)
 
     overall_wr = wr(resolved)
     overall_brier = brier(resolved)
@@ -280,9 +297,9 @@ def section_for_bot(
     drift = abs(overall_avg_pred - overall_wr) if not _isnan(overall_wr) else float("nan")
 
     lines = [f"\n{name} — {int(window_secs / 3600)}h"]
-    stuck_marker = f", ⚠️ {n_stuck} stuck >48h" if n_stuck > 0 else ""
+    stuck_marker = f", ⚠️ {n_stuck} stuck >7d" if n_stuck > 0 else ""
     lines.append(
-        f"  Total: {n_total}t  ({n_res} resueltos, {n_young} pendientes <48h{stuck_marker})"
+        f"  Total: {n_total}t  ({n_res} resueltos, {n_young} pendientes <96h{stuck_marker})"
     )
     if n_res > 0:
         sign = "+" if overall_pnl >= 0 else ""
