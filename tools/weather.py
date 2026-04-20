@@ -154,9 +154,12 @@ def _estimate_probability(forecast_temp: float, threshold: float, comparison: st
     """
     import math
 
-    # Dynamic forecast error: grows linearly with days ahead
-    # Matches weather-bot: max(1.5, 1.0 + days_ahead * 0.4)
-    std_dev = max(1.5, 1.0 + days_ahead * 0.4)
+    # Dynamic forecast error: grows linearly with days ahead.
+    # Widened on 2026-04-20 after observing 41% drift on N=9 trades:
+    # model predicted ~0.94 avg, actual WR was 0.44. Old std_dev (1.5°C base,
+    # 1.8°C at 2d) underestimated forecast uncertainty. Real MAE for 2-day
+    # forecasts is ~2-3°C → std_dev ~2.5-3°C. Bumping base + slope.
+    std_dev = max(2.5, 1.5 + days_ahead * 0.5)
 
     if std_dev == 0:
         return 1.0 if forecast_temp >= threshold else 0.0
@@ -245,7 +248,7 @@ def get_weather_forecast(
             # Range calculation: P(low <= temp <= high)
             if comparison == "range" and threshold_c_high is not None:
                 import math as _math
-                std_dev = max(1.5, 1.0 + days_ahead * 0.4)
+                std_dev = max(2.5, 1.5 + days_ahead * 0.5)  # widened — see estimate_probability
                 z_low = (threshold_c - forecast_temp) / std_dev
                 z_high = (threshold_c_high - forecast_temp) / std_dev
                 p_low = 0.5 * (1 + _math.erf(z_low / _math.sqrt(2)))

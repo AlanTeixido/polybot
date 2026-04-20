@@ -306,6 +306,33 @@ def section_for_bot(
             f"P&L {sign}{overall_pnl:.1f}{currency} | drift {drift_str}"
         )
 
+    # Calibration buckets — confirms WHY drift exists (which p ranges miscalibrate)
+    if n_res >= 3:
+        buckets = [
+            (0.95, 1.01, "p≥0.95"),
+            (0.80, 0.95, "p 0.80-0.95"),
+            (0.60, 0.80, "p 0.60-0.80"),
+            (0.40, 0.60, "p 0.40-0.60"),
+            (0.0, 0.40, "p<0.40"),
+        ]
+        bucket_lines = []
+        for lo, hi, label in buckets:
+            sub = [t for t in resolved if lo <= t.get("p_predicted", 0) < hi]
+            if not sub:
+                continue
+            n = len(sub)
+            avg_p = sum(t["p_predicted"] for t in sub) / n
+            real = sum(t["actual_won"] for t in sub) / n
+            gap = avg_p - real
+            warn = " 🚨" if abs(gap) > 0.30 else (" ⚠️" if abs(gap) > 0.15 else "")
+            n_warn = " (N bajo)" if n < 3 else ""
+            bucket_lines.append(
+                f"    {label}: N={n} pred={avg_p:.2f} real={real:.2f} gap={gap:+.2f}{warn}{n_warn}"
+            )
+        if bucket_lines:
+            lines.append("  Calibración por bucket:")
+            lines.extend(bucket_lines)
+
     # Per-group breakdown
     groups: dict[str, list[dict]] = defaultdict(list)
     for t in resolved:

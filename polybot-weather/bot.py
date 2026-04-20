@@ -478,6 +478,14 @@ def evaluate_market(market: dict, min_edge: float, verbose: bool = False, venue_
             logger.info(f"  SKIP (parse failed): {title[:70]}")
         return None
 
+    # PAUSED 2026-04-20: equal markets had Brier 0.40 / WR 57% on N=7 — actively
+    # losing money. Disable until the model is recalibrated and we have evidence
+    # the new wider std_dev fixes the systematic overconfidence.
+    if parsed["comparison"] == "equal":
+        if verbose:
+            logger.info(f"  SKIP (equal markets paused for recalibration): {title[:70]}")
+        return None
+
     target_date = parse_target_date(title)
     if not target_date:
         if verbose:
