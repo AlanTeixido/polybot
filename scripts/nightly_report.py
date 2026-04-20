@@ -171,20 +171,18 @@ def resolve_trades(
     trades: list[dict], api_key: str
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """Split into three buckets:
-    - resolved: venue confirms an outcome
-    - pending_young: age < 96h, resolution still plausible in-window
-    - pending_stuck: age >= 168h (7d) AND still unresolved → real alarm
-    Trades 96h-168h old that aren't resolved are grouped with pending_young
-    because weather markets with future target dates can legitimately stay
-    open that long (e.g. trade entered 4d before the target day).
+    - resolved: venue confirms an outcome (regardless of age)
+    - pending_young: venue says not-resolved, age < 7d → normal
+    - pending_stuck: venue says not-resolved, age >= 7d → real alarm
+
+    We ALWAYS query the API rather than skipping by age. A market can resolve
+    faster than expected (cash-hitting-target, early settlement) so gating
+    by age hides real resolutions. API cost is ~30 calls/report, negligible.
     """
     resolved, pending_young, pending_stuck = [], [], []
     cache: dict[tuple[str, str], dict | None] = {}
     for t in trades:
         age = NOW - t.get("timestamp", NOW)
-        if age < PENDING_THRESHOLD_SECS:
-            pending_young.append(t)
-            continue
         mid = t.get("market_id", "")
         venue = t.get("venue", "sim")
         key = (venue, mid)
@@ -197,7 +195,6 @@ def resolve_trades(
         elif age >= STUCK_THRESHOLD_SECS:
             pending_stuck.append(t)
         else:
-            # >96h but <168h and not yet resolved — still normal for weather markets
             pending_young.append(t)
     return resolved, pending_young, pending_stuck
 
@@ -299,7 +296,7 @@ def section_for_bot(
     lines = [f"\n{name} — {int(window_secs / 3600)}h"]
     stuck_marker = f", ⚠️ {n_stuck} stuck >7d" if n_stuck > 0 else ""
     lines.append(
-        f"  Total: {n_total}t  ({n_res} resueltos, {n_young} pendientes <96h{stuck_marker})"
+        f"  Total: {n_total}t  ({n_res} resueltos, {n_young} pendientes{stuck_marker})"
     )
     if n_res > 0:
         sign = "+" if overall_pnl >= 0 else ""
