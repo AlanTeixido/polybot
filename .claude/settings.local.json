@@ -18,7 +18,8 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\('polybot-weather/bot.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "WebFetch(domain:www.simmer.markets)"
     ]
   }
 }
