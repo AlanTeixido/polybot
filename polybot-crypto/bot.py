@@ -43,11 +43,17 @@ BINANCE_API = "https://api.binance.com/api/v3"
 # Examples:
 #   "Bitcoin Up or Down - April 21, 10:00AM-10:05AM ET"
 #   "Ethereum Up or Down - April 21, 10:00-10:15 ET"
+# Matches titles like:
+#   "Bitcoin Up or Down - April 20, 5AM ET"            → end at 5:00
+#   "Bitcoin Up or Down - April 20, 10:00AM-10:05AM ET" → end at 10:05
+#   "Ethereum Up or Down - April 20, 5:45AM-6:00AM ET"  → end at 6:00
 TITLE_RE = re.compile(
     r"(Bitcoin|Ethereum|XRP|Solana|Dogecoin)\s+Up\s+or\s+Down\s*-\s*"
     r"(\w+)\s+(\d+),?\s+"
-    r"(\d{1,2}):(\d{2})(?:AM|PM|am|pm)?\s*-\s*"
-    r"(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)?\s*ET",
+    # Optional start time followed by "-" (e.g. "10:00AM-" or "5:45AM-")
+    r"(?:\d{1,2}(?::\d{2})?(?:AM|PM|am|pm)?\s*-\s*)?"
+    # End time: required. Formats: "5AM", "5:00AM", "5:00"
+    r"(\d{1,2})(?::(\d{2}))?\s*(AM|PM|am|pm)?\s*ET",
     re.IGNORECASE,
 )
 
@@ -101,15 +107,19 @@ def parse_end_time(title: str) -> tuple[str, datetime] | None:
     if not m:
         return None
     asset = m.group(1).title()
-    month_name, day, _h1, _m1, h2, m2, ampm = m.group(2), m.group(3), m.group(4), m.group(5), m.group(6), m.group(7), m.group(8)
+    month_name = m.group(2)
+    day = m.group(3)
+    h_end = m.group(4)
+    min_end = m.group(5) or "0"
+    ampm = m.group(6)
 
     try:
         month = datetime.strptime(month_name[:3], "%b").month
     except Exception:
         return None
 
-    hour = int(h2)
-    minute = int(m2)
+    hour = int(h_end)
+    minute = int(min_end)
     if ampm and ampm.lower() == "pm" and hour < 12:
         hour += 12
     if ampm and ampm.lower() == "am" and hour == 12:
@@ -419,9 +429,12 @@ def cycle(config: dict, state: dict, cycle_num: int) -> None:
             side=opp["side"],
             amount_usdc=bet,
             reason=f"Momentum arb: edge={opp['edge']:+.2f}, P_fair={opp['p_fair']}",
-            simmer_api_key=config["simmer_api_key"],
+            wallet_address="",
+            private_key="",
+            max_bet_usdc=max_bet,
+            dry_run=False,
             venue="sim",
-            entry_price=opp["entry_price"],
+            simmer_api_key=config["simmer_api_key"],
         )
         if result.get("executed"):
             state.setdefault("open_positions", {})[opp["market_id"]] = {
