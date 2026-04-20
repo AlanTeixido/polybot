@@ -248,14 +248,26 @@ def evaluate_market(market: dict, config: dict, verbose: bool = False) -> dict |
 
     p_fair = compute_fair_probability(klines, spot)
 
-    # Get current market prices
-    detail = get_market_detail(market_id, venue="sim", simmer_api_key=config["simmer_api_key"])
-    if "error" in detail:
+    # Use the market object's price (fresher than get_market_detail which often returns default 0.5)
+    # get_markets returns yes_probability as percentage 0-100
+    yes_prob_raw = market.get("yes_probability")
+    if yes_prob_raw is None:
+        # Fallback to fetching detail
+        detail = get_market_detail(market_id, venue="sim", simmer_api_key=config["simmer_api_key"])
+        if "error" in detail:
+            if verbose:
+                logger.info(f"  SKIP (detail error): {title[:80]}")
+            return None
+        yes_price = detail.get("yes_price", 0.5)
+    else:
+        yes_price = float(yes_prob_raw) / 100.0 if yes_prob_raw > 1 else float(yes_prob_raw)
+    no_price = round(1 - yes_price, 4)
+
+    # Sanity: if prices seem default (exactly 0.5/0.5), skip — we can't trust them
+    if abs(yes_price - 0.5) < 0.001 and abs(no_price - 0.5) < 0.001:
         if verbose:
-            logger.info(f"  SKIP (detail error): {title[:80]}")
+            logger.info(f"  SKIP (suspicious default 0.5/0.5 prices): {title[:80]}")
         return None
-    yes_price = detail.get("yes_price", 0.5)
-    no_price = detail.get("no_price", 0.5)
 
     # YES = price goes up
     edge_yes = p_fair - yes_price
