@@ -148,14 +148,19 @@ def fetch_resolution(market_id: str, venue: str, api_key: str) -> dict | None:
     return fetch_resolution_simmer(market_id, api_key)
 
 
-def resolve_trades(trades: list[dict], api_key: str) -> tuple[list[dict], list[dict]]:
-    """Split into resolved + pending. Trades younger than 48h are always pending."""
-    resolved, pending = [], []
+def resolve_trades(
+    trades: list[dict], api_key: str
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Split into resolved, pending_young (<48h), and pending_unresolved (>48h but API
+    couldn't confirm resolution — either still open on the venue or API failure).
+    Returning three buckets makes it visible when a >48h trade is silently stuck.
+    """
+    resolved, pending_young, pending_unresolved = [], [], []
     cache: dict[tuple[str, str], dict | None] = {}
     for t in trades:
         age = NOW - t.get("timestamp", NOW)
         if age < PENDING_THRESHOLD_SECS:
-            pending.append(t)
+            pending_young.append(t)
             continue
         mid = t.get("market_id", "")
         venue = t.get("venue", "sim")
@@ -167,8 +172,8 @@ def resolve_trades(trades: list[dict], api_key: str) -> tuple[list[dict], list[d
             won = 1 if res["winner"] == t.get("side", "").upper() else 0
             resolved.append({**t, "actual_won": won})
         else:
-            pending.append(t)
-    return resolved, pending
+            pending_unresolved.append(t)
+    return resolved, pending_young, pending_unresolved
 
 
 def brier(resolved: list[dict]) -> float:
@@ -246,11 +251,12 @@ def section_for_bot(
         trades = [t for t in all_trades if t.get("source") == source_filter]
     else:
         trades = all_trades
-    resolved, pending = resolve_trades(trades, api_key)
+    resolved, pending_young, pending_unresolved = resolve_trades(trades, api_key)
 
     n_total = len(trades)
     n_res = len(resolved)
-    n_pend = len(pending)
+    n_young = len(pending_young)
+    n_stuck = len(pending_unresolved)
 
     overall_wr = wr(resolved)
     overall_brier = brier(resolved)
@@ -259,8 +265,9 @@ def section_for_bot(
     drift = abs(overall_avg_pred - overall_wr) if not _isnan(overall_wr) else float("nan")
 
     lines = [f"\n{name} — {int(window_secs / 3600)}h"]
+    stuck_marker = f", ⚠️ {n_stuck} stuck >48h" if n_stuck > 0 else ""
     lines.append(
-        f"  Total: {n_total}t  ({n_res} resueltos, {n_pend} pendientes <48h)"
+        f"  Total: {n_total}t  ({n_res} resueltos, {n_young} pendientes <48h{stuck_marker})"
     )
     if n_res > 0:
         sign = "+" if overall_pnl >= 0 else ""
