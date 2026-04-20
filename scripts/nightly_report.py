@@ -385,14 +385,18 @@ def section_for_bot(
                 lines.append("  Calibración por bucket:")
                 lines.extend(bucket_lines)
 
-    # Per-group breakdown
+    # Per-group breakdown (aggregate across pre+post). Own header to avoid
+    # visually nesting inside the Post-fix sub-block.
     groups: dict[str, list[dict]] = defaultdict(list)
     for t in resolved:
         key = t.get(group_field, "unknown")
         groups[key].append(t)
-    for key in sorted(groups.keys()):
-        sub = groups[key]
-        lines.append(fmt_metric(f"  {key}", len(sub), wr(sub), brier(sub), pnl(sub), currency))
+    if groups:
+        header = "Per-type:" if is_weather else "Per-asset:"
+        lines.append(f"  {header}")
+        for key in sorted(groups.keys()):
+            sub = groups[key]
+            lines.append(fmt_metric(f"  {key}", len(sub), wr(sub), brier(sub), pnl(sub), currency))
 
     return "\n".join(lines), {
         "n_resolved": n_res,
