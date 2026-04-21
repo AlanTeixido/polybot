@@ -466,8 +466,23 @@ def place_order(
 # ---------------------------------------------------------------------------
 # Trading logic
 # ---------------------------------------------------------------------------
-def evaluate_market(market: dict, min_edge: float, verbose: bool = False, venue_hint: str = "sim") -> dict | None:
-    """Evaluate a single weather market. Returns trade decision or None."""
+def evaluate_market(
+    market: dict,
+    min_edge: float,
+    verbose: bool = False,
+    venue_hint: str = "sim",
+    skip_counts: dict | None = None,
+) -> dict | None:
+    """Evaluate a single weather market. Returns trade decision or None.
+
+    skip_counts: optional dict mutated in-place to track why markets are skipped.
+    Keys used: parse_failed, equal_paused, no_date, no_forecast, no_temp,
+    edge_too_small, entry_too_high, entry_too_low, market_extreme, no_yes_on_exact.
+    """
+    def _tick(k: str) -> None:
+        if skip_counts is not None and k in skip_counts:
+            skip_counts[k] += 1
+
     title = market.get("question", "")
     market_id = market.get("id", "")
     current_price = float(market.get("current_probability", market.get("current_price", 0.5)))
@@ -476,6 +491,7 @@ def evaluate_market(market: dict, min_edge: float, verbose: bool = False, venue_
     if not parsed:
         if verbose:
             logger.info(f"  SKIP (parse failed): {title[:70]}")
+        _tick("parse_failed")
         return None
 
     # PAUSED 2026-04-20: equal markets had Brier 0.40 / WR 57% on N=7 — actively
@@ -484,24 +500,28 @@ def evaluate_market(market: dict, min_edge: float, verbose: bool = False, venue_
     if parsed["comparison"] == "equal":
         if verbose:
             logger.info(f"  SKIP (equal markets paused for recalibration): {title[:70]}")
+        _tick("equal_paused")
         return None
 
     target_date = parse_target_date(title)
     if not target_date:
         if verbose:
             logger.info(f"  SKIP (no date): {title[:70]}")
+        _tick("no_date")
         return None
 
     forecast_data = get_forecast(parsed["city"])
     if not forecast_data:
         if verbose:
             logger.info(f"  SKIP (no forecast): {parsed['city']} | {title[:60]}")
+        _tick("no_forecast")
         return None
 
     day_forecast = forecast_data["forecasts"].get(target_date)
     if not day_forecast:
         if verbose:
             logger.info(f"  SKIP (no forecast for {target_date}): {parsed['city']} | {title[:50]}")
+        _tick("no_forecast")
         return None
 
     # Pick the right temp based on metric
@@ -509,6 +529,7 @@ def evaluate_market(market: dict, min_edge: float, verbose: bool = False, venue_
     if temp_c is None:
         if verbose:
             logger.info(f"  SKIP (no temp): {parsed['city']} {target_date}")
+        _tick("no_temp")
         return None
 
     # Calculate days ahead for uncertainty
@@ -547,6 +568,7 @@ def evaluate_market(market: dict, min_edge: float, verbose: bool = False, venue_
         effective_min_edge = max(min_edge, 0.25)  # At least 25% edge for range markets (narrow 1°C window)
 
     if abs_edge < effective_min_edge:
+        _tick("edge_too_small")
         return None
 
     side = "yes" if edge > 0 else "no"
@@ -557,6 +579,7 @@ def evaluate_market(market: dict, min_edge: float, verbose: bool = False, venue_
     if parsed["comparison"] == "equal" and side == "yes":
         if verbose:
             logger.info(f"  SKIP (no YES on exact-temp): {title[:60]} edge={edge:+.2f}")
+        _tick("no_yes_on_exact")
         return None
 
     # Entry price is the side we're buying
@@ -569,6 +592,7 @@ def evaluate_market(market: dict, min_edge: float, verbose: bool = False, venue_
     if entry_price > max_entry:
         if verbose:
             logger.info(f"  SKIP (entry {entry_price:.2f} > {max_entry}): {title[:60]}")
+        _tick("entry_too_high")
         return None
 
     # MIN entry price: reject trades where the side we're buying is too cheap (<5¢)
@@ -577,6 +601,7 @@ def evaluate_market(market: dict, min_edge: float, verbose: bool = False, venue_
     if entry_price < 0.05:
         if verbose:
             logger.info(f"  SKIP (entry {entry_price:.2f} < 0.05, market likely resolving): {title[:60]}")
+        _tick("entry_too_low")
         return None
 
     # MARKET PRICE EXTREMES: skip markets at 0.99+ or 0.01- on the OPPOSITE side
@@ -585,6 +610,7 @@ def evaluate_market(market: dict, min_edge: float, verbose: bool = False, venue_
     if current_price >= 0.99 or current_price <= 0.01:
         if verbose:
             logger.info(f"  SKIP (market extreme {current_price:.2f}, likely resolving): {title[:60]}")
+        _tick("market_extreme")
         return None
 
     return {
@@ -710,6 +736,28 @@ class WeatherBot:
         self.dry_run = config.get("dry_run", False)
         self.cycle_interval = int(config.get("cycle_interval_seconds", 180))
         self.currency = "USDC" if self.venue == "polymarket" else "$SIM"
+        # Skip counters — reset each summary window (~6h). Aggregate visibility
+        # into why markets are filtered without needing verbose logging.
+        self._skip_counts: dict[str, int] = {
+            "equal_paused": 0,
+            "parse_failed": 0,
+            "no_date": 0,
+            "no_forecast": 0,
+            "no_temp": 0,
+            "edge_too_small": 0,
+            "entry_too_high": 0,
+            "entry_too_low": 0,
+            "market_extreme": 0,
+            "no_yes_on_exact": 0,
+            "correlation_limit": 0,
+            "bet_too_small": 0,
+            "shares_below_min": 0,
+            "already_traded": 0,
+            "already_failed": 0,
+        }
+        # Snapshot of total_trades at window start — used to compute trades
+        # executed within the current window for the evaluated-count math.
+        self._trades_at_window_start = self.state.get("total_trades", 0)
 
     def cycle(self) -> None:
         balance = fetch_balance(self.api_key, venue=self.venue, wallet_address=self.wallet_address)
@@ -773,16 +821,22 @@ class WeatherBot:
         failed_set = set(self.state.get("failed_markets", []))
         for m in weather_markets:
             if m.get("id") in self.state.get("traded_markets", []):
+                self._skip_counts["already_traded"] += 1
                 continue  # already traded this market
             if m.get("id") in failed_set:
+                self._skip_counts["already_failed"] += 1
                 continue  # already failed, don't retry
-            decision = evaluate_market(m, self.min_edge, verbose=verbose, venue_hint=self.venue)
+            decision = evaluate_market(
+                m, self.min_edge, verbose=verbose, venue_hint=self.venue,
+                skip_counts=self._skip_counts,
+            )
             if decision:
                 # Check correlation limit
                 _ck = f"{decision['city']}|{parse_target_date(decision['title']) or ''}"
                 if _city_date_counts.get(_ck, 0) >= max_correlated:
                     if verbose:
                         logger.info(f"  SKIP (correlation limit {max_correlated}): {decision['city']} {_ck}")
+                    self._skip_counts["correlation_limit"] += 1
                     continue
                 opportunities.append(decision)
 
@@ -807,6 +861,7 @@ class WeatherBot:
             )
             if bet < min_bet:
                 logger.info(f"SKIP (bet too small): {opp['title'][:50]} bet={bet}")
+                self._skip_counts["bet_too_small"] += 1
                 continue
 
             # Polymarket requires ≥5 shares per order. shares = bet / entry_price.
@@ -817,6 +872,7 @@ class WeatherBot:
                 logger.info(
                     f"SKIP (would be {bet / _entry:.2f} shares < 5): {opp['title'][:50]} bet={bet}"
                 )
+                self._skip_counts["shares_below_min"] += 1
                 continue
 
             reason = (
@@ -946,21 +1002,40 @@ class WeatherBot:
         send_telegram("*Weather Bot stopped*", self.config)
 
     def _send_summary(self) -> None:
-        """Send periodic Telegram summary with balance + stats."""
+        """Send periodic Telegram summary with balance + stats + skip counters."""
         bal = fetch_balance(self.api_key, venue=self.venue, wallet_address=self.wallet_address)
         wins = self.state.get("wins", 0)
         losses = self.state.get("losses", 0)
         pnl = self.state.get("pnl", 0.0)
         total = self.state.get("total_trades", 0)
         wr = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
-        msg = (
-            f"📊 *Weather Bot Summary*\n"
-            f"Balance: {bal:.2f} {self.currency}\n"
-            f"Total trades: {total}\n"
-            f"Wins/Losses: {wins}W / {losses}L (WR: {wr:.0f}%)\n"
-            f"PnL: {pnl:+.2f} {self.currency}"
-        )
-        send_telegram(msg, self.config)
+
+        msg_parts = [
+            "📊 *Weather Bot Summary*",
+            f"Balance: {bal:.2f} {self.currency}",
+            f"Total trades: {total}",
+            f"Wins/Losses: {wins}W / {losses}L (WR: {wr:.0f}%)",
+            f"PnL: {pnl:+.2f} {self.currency}",
+        ]
+
+        # Skip counters for the current window
+        nonzero = [(k, v) for k, v in self._skip_counts.items() if v > 0]
+        if nonzero:
+            nonzero.sort(key=lambda kv: kv[1], reverse=True)
+            trades_executed_window = max(0, total - self._trades_at_window_start)
+            total_evaluated = sum(v for _, v in nonzero) + trades_executed_window
+            msg_parts.append("")
+            msg_parts.append("Skips last 6h:")
+            for k, v in nonzero:
+                msg_parts.append(f"  {k}: {v}")
+            msg_parts.append(f"  (total evaluated: ~{total_evaluated})")
+
+        send_telegram("\n".join(msg_parts), self.config)
+
+        # Reset window counters so the next summary shows only the next 6h
+        for k in self._skip_counts:
+            self._skip_counts[k] = 0
+        self._trades_at_window_start = total
 
 
 def main() -> None:
