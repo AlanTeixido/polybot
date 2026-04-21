@@ -804,6 +804,16 @@ class WeatherBot:
                 logger.info(f"SKIP (bet too small): {opp['title'][:50]} bet={bet}")
                 continue
 
+            # Polymarket requires ≥5 shares per order. shares = bet / entry_price.
+            # If Kelly suggests a bet that produces fewer shares, skip rather than
+            # let place_order fail downstream (which used to spam Telegram).
+            _entry = opp.get("entry_price", 0.5)
+            if _entry > 0 and bet / _entry < 5.0:
+                logger.info(
+                    f"SKIP (would be {bet / _entry:.2f} shares < 5): {opp['title'][:50]} bet={bet}"
+                )
+                continue
+
             reason = (
                 f"{opp['city']} {opp['metric']} forecast {opp['forecast_temp_c']:.1f}C "
                 f"vs threshold {opp['threshold_c']} {opp['comparison']} "
@@ -874,9 +884,13 @@ class WeatherBot:
                     self.state.setdefault("failed_markets", []).append(opp["market_id"])
                     save_state(self.state)
 
-                # Only notify on REAL errors
+                # Only notify on REAL errors. These are non-actionable noise:
+                # - too small / below minimum: Kelly bet under 5-share floor (not a problem)
+                # - no asks / order book: thin liquidity, normal, bot skips to next market
+                # - too high / correlation / already / spread / no stacking: pre-existing filters
                 is_silent = is_network or is_balance or any(kw in err_lower for kw in [
                     "too high", "correlation", "already", "spread too high", "no stacking",
+                    "too small", "below minimum", "no asks", "order book", "rounding",
                 ])
                 if self.venue == "polymarket" and not is_silent:
                     send_telegram(
