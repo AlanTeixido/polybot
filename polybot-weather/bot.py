@@ -98,6 +98,20 @@ CITY_COORDS: dict[str, tuple[float, float]] = {
     "auckland": (-36.8485, 174.7633), "milan": (45.4642, 9.1900),
     "amsterdam": (52.3676, 4.9041), "vienna": (48.2082, 16.3738),
     "warsaw": (52.2297, 21.0122), "moscow": (55.7558, 37.6173),
+    # Added 2026-04-21 — parity with tools/weather.py after commit 33d89c3
+    # missed the bot.py local dict. Confirmed in skip log: helsinki (42),
+    # panama city (24). Rest mirror the preventive set from that commit.
+    "wellington": (-41.2865, 174.7762), "panama city": (8.9824, -79.5199),
+    "stockholm": (59.3293, 18.0686), "copenhagen": (55.6761, 12.5683),
+    "oslo": (59.9139, 10.7522), "helsinki": (60.1699, 24.9384),
+    "dublin": (53.3498, -6.2603), "lisbon": (38.7223, -9.1393),
+    "barcelona": (41.3851, 2.1734), "athens": (37.9838, 23.7275),
+    "prague": (50.0755, 14.4378), "budapest": (47.4979, 19.0402),
+    "zurich": (47.3769, 8.5417), "brussels": (50.8503, 4.3517),
+    "caracas": (10.4806, -66.9036), "havana": (23.1136, -82.3666),
+    "accra": (5.6037, -0.1870), "addis ababa": (9.0054, 38.7636),
+    "ankara": (39.9334, 32.8597), "bangalore": (12.9716, 77.5946),
+    "hyderabad": (17.3850, 78.4867),
 }
 
 # ---------------------------------------------------------------------------
