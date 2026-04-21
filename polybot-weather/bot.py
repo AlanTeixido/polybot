@@ -626,7 +626,12 @@ def compute_bet_size(
     - 10% fee (fee_rate_bps=1000)
     """
     max_bet = float(config.get("max_bet", config.get("max_bet_usdc", 50)))
-    max_pct = float(config.get("max_pct_balance", 0.02))
+    # Raised from 0.02 to 0.05 on 2026-04-21: with small real-money balance (~$180),
+    # 2% cap meant base=$3.60 which combined with Kelly normalization often produced
+    # bets that failed Polymarket's 5-share minimum after slippage. At 5%, small
+    # balances have enough Kelly headroom while large balances still get capped by
+    # max_bet_usdc (the explicit user-set dollar cap).
+    max_pct = float(config.get("max_pct_balance", 0.05))
 
     abs_edge = abs(edge)
 

@@ -5,7 +5,7 @@
   "dry_run": false,
   "min_edge": 0.20,
   "max_bet": 50,
-  "max_pct_balance": 0.02,
+  "max_pct_balance": 0.05,
   "cycle_interval_seconds": 180,
   "max_trades_per_cycle": 3
 }
