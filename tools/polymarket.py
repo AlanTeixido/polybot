@@ -67,7 +67,10 @@ def get_clob_client(
 
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "Polybot/1.0"})
-REQUEST_TIMEOUT = 15
+REQUEST_TIMEOUT = 30  # raised from 15 on 2026-04-22 — Simmer order endpoint
+# was timing out 10+ times in 14h overnight, suspected cause of crypto bot
+# silent crash (file descriptor or socket pool exhaustion).
+ORDER_TIMEOUT = 45  # higher for POST /trade specifically — server-side processing
 
 # Blacklist keywords for auto-filtering
 BLACKLIST_KEYWORDS = [
@@ -770,20 +773,43 @@ def place_order(
     # --- Simmer venue ---
     if venue == "sim" and simmer_api_key:
         try:
-            resp = SESSION.post(
-                f"{SIMMER_API}/trade",
-                headers={"Authorization": f"Bearer {simmer_api_key}"},
-                json={
-                    "market_id": market_id,
-                    "side": side.lower(),
-                    "amount": amount_usdc,
-                    "venue": "sim",
-                    "reasoning": reason,
-                    "source": "sdk:polybot",
-                },
-                timeout=REQUEST_TIMEOUT,
-            )
-            resp.raise_for_status()
+            # Retry once on timeout / 5xx — the Simmer /trade endpoint was
+            # timing out repeatedly overnight (10+ events in 14h on 2026-04-21).
+            # ORDER_TIMEOUT (45s) is more lenient than REQUEST_TIMEOUT for this
+            # specific POST since it triggers server-side trade processing.
+            resp = None
+            last_exc: Exception | None = None
+            for attempt in (1, 2):
+                try:
+                    resp = SESSION.post(
+                        f"{SIMMER_API}/trade",
+                        headers={"Authorization": f"Bearer {simmer_api_key}"},
+                        json={
+                            "market_id": market_id,
+                            "side": side.lower(),
+                            "amount": amount_usdc,
+                            "venue": "sim",
+                            "reasoning": reason,
+                            "source": "sdk:polybot",
+                        },
+                        timeout=ORDER_TIMEOUT,
+                    )
+                    resp.raise_for_status()
+                    break
+                except requests.exceptions.Timeout as e:
+                    last_exc = e
+                    logger.warning(f"Simmer order timeout attempt {attempt}/2: {e}")
+                    if attempt == 2:
+                        raise
+                    time.sleep(2)
+                except requests.exceptions.HTTPError as e:
+                    last_exc = e
+                    if resp is not None and 500 <= resp.status_code < 600 and attempt == 1:
+                        logger.warning(f"Simmer order 5xx attempt {attempt}/2: {e}")
+                        time.sleep(2)
+                        continue
+                    raise
+            assert resp is not None
             result = resp.json()
 
             logger.info(
