@@ -1025,8 +1025,17 @@ class WeatherBot:
 
     def _check_loss_alerts(self) -> None:
         """Send a one-time Telegram alert when any open position crosses
-        ``loss_alert_pct`` unrealized. Alerted market IDs persist in state so
-        the same position never triggers twice. Real-money venue only."""
+        ``loss_alert_pct`` unrealized. Alerted position titles persist in state
+        so the same market never triggers twice. Real-money venue only.
+
+        Disabled by default: data-api.polymarket.com/positions returns only
+        resolved positions for Simmer-mediated wallets, and Simmer's own
+        /positions endpoint returns [] for this account. Need to identify the
+        correct Simmer endpoint (likely /agents/me/positions or similar).
+        Opt in with config "loss_alerts_enabled": true once fixed.
+        """
+        if not self.config.get("loss_alerts_enabled", False):
+            return
         if self.venue != "polymarket" or not self.wallet_address:
             return
         try:
