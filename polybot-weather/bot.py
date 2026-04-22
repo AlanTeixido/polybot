@@ -459,8 +459,14 @@ def place_order(
     venue: str = "sim",
     dry_run: bool = False,
     order_type: str = "GTC",
+    action: str = "buy",
+    shares: float | None = None,
+    source: str = "sdk:weather-bot",
 ) -> dict:
     """Place a trade on Simmer.
+
+    action="buy" (default): open a position, size = amount USDC.
+    action="sell": close/reduce a position, size = shares (preferred) or amount USDC.
 
     order_type defaults to "GTC" (Good-Till-Cancelled). Previously the Simmer
     default was FAK (Fill-and-Kill), which refuses any partial match and was
@@ -470,21 +476,26 @@ def place_order(
     captured as long as counterparty appears.
     """
     if dry_run:
-        logger.info(f"[DRY RUN] {venue} {side} {amount} on {market_id}: {reason}")
+        logger.info(f"[DRY RUN] {venue} {action} {side} {shares or amount} on {market_id}: {reason}")
         return {"executed": False, "dry_run": True}
+    payload = {
+        "market_id": market_id,
+        "side": side.lower(),
+        "action": action,
+        "venue": venue,
+        "reasoning": reason[:200],
+        "source": source,
+        "order_type": order_type,
+    }
+    if action == "sell" and shares is not None:
+        payload["shares"] = shares
+    else:
+        payload["amount"] = amount
     try:
         resp = SESSION.post(
             f"{SIMMER_API}/trade",
             headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "market_id": market_id,
-                "side": side.lower(),
-                "amount": amount,
-                "venue": venue,
-                "reasoning": reason[:200],
-                "source": "sdk:weather-bot",
-                "order_type": order_type,
-            },
+            json=payload,
             timeout=REQUEST_TIMEOUT,
         )
         if resp.status_code >= 400:
@@ -806,6 +817,15 @@ class WeatherBot:
         # Alerted positions tracked in state to avoid re-alerts on the same market.
         self.loss_alert_pct = float(config.get("loss_alert_pct", -0.10))
         self.alerted_positions: set[str] = set(self.state.get("alerted_positions", []))
+        # Bot-side stop-loss. Simmer's risk-monitor is inconsistent for SDK
+        # trades (observed positions at -25%/-29% that never auto-closed), so
+        # the bot runs its own safety net. When pnl / cost_basis <= stop_loss_pct
+        # and the market_id has not been sold yet, the bot submits a GTC sell
+        # for the full holding and remembers the market_id so it never retries.
+        # Disable with "stop_loss_enabled": false.
+        self.stop_loss_enabled = bool(config.get("stop_loss_enabled", True))
+        self.stop_loss_pct = float(config.get("stop_loss_pct", -0.10))
+        self.stop_loss_fired: set[str] = set(self.state.get("stop_loss_fired", []))
         # Skip counters — reset each summary window (~6h). Aggregate visibility
         # into why markets are filtered without needing verbose logging.
         self._skip_counts: dict[str, int] = {
@@ -1034,6 +1054,9 @@ class WeatherBot:
         # Check for loss-threshold crossings on open positions (one-shot alerts).
         self._check_loss_alerts()
 
+        # Bot-side stop-loss: sell anything that crossed the pain threshold.
+        self._check_stop_loss()
+
     def _check_loss_alerts(self) -> None:
         """Send a one-time Telegram alert when any open position crosses
         ``loss_alert_pct`` unrealized. Alerted position titles persist in state
@@ -1094,6 +1117,92 @@ class WeatherBot:
         if new_alerts:
             self.state["alerted_positions"] = list(self.alerted_positions)
             save_state(self.state)
+
+    def _check_stop_loss(self) -> None:
+        """Bot-side stop-loss. Fetches open positions from Simmer's positions
+        endpoint (which unlike data-api.polymarket.com returns live SDK-placed
+        positions) and sells any with unrealized pnl / cost_basis below
+        stop_loss_pct. One-shot per market: once we attempt to close a market
+        the ID goes into stop_loss_fired and is never re-tried."""
+        if not self.stop_loss_enabled:
+            return
+        if self.venue != "polymarket":
+            return
+        try:
+            resp = SESSION.get(
+                f"{SIMMER_API}/positions",
+                params={"venue": "polymarket", "status": "active"},
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                timeout=REQUEST_TIMEOUT,
+            )
+            resp.raise_for_status()
+            positions = resp.json().get("positions", [])
+        except Exception as e:
+            logger.warning(f"stop_loss fetch_positions failed: {e}")
+            return
+
+        for pos in positions:
+            mid = str(pos.get("market_id", ""))
+            if not mid or mid in self.stop_loss_fired:
+                continue
+            cost = float(pos.get("cost_basis") or 0)
+            pnl = float(pos.get("pnl") or 0)
+            if cost <= 0:
+                continue
+            pct = pnl / cost
+            if pct > self.stop_loss_pct:
+                continue
+
+            shares_yes = float(pos.get("shares_yes") or 0)
+            shares_no = float(pos.get("shares_no") or 0)
+            if shares_yes > shares_no:
+                side, shares = "yes", shares_yes
+            elif shares_no > 0:
+                side, shares = "no", shares_no
+            else:
+                continue
+            if shares <= 0:
+                continue
+
+            title = str(pos.get("question") or "")[:80]
+            reason = f"stop_loss: pnl {pct * 100:+.1f}% <= {self.stop_loss_pct * 100:.0f}%"
+            logger.info(f"STOP-LOSS [{side.upper()} {shares:.2f} shares]: {title[:50]} | {reason}")
+            result = place_order(
+                self.api_key,
+                mid,
+                side,
+                amount=0.0,
+                reason=reason,
+                venue=self.venue,
+                dry_run=self.dry_run,
+                action="sell",
+                shares=round(shares, 4),
+                source="sdk:weather-bot:stop-loss",
+            )
+
+            # Mark the market as fired regardless of fill outcome to avoid
+            # retry storms on stuck orders. A failed sell still consumed one
+            # Simmer request.
+            self.stop_loss_fired.add(mid)
+            if result.get("executed"):
+                send_telegram(
+                    f"🛑 *Stop-loss fired*\n{title}\n"
+                    f"Side {side.upper()} | {shares:.2f} shares @ {float(pos.get('avg_cost', 0)):.3f}\n"
+                    f"Unrealized: ${pnl:+.2f} ({pct * 100:+.1f}%)\n"
+                    f"Sell order placed (GTC)",
+                    self.config,
+                )
+            else:
+                err = result.get("error", "unknown")
+                logger.warning(f"stop_loss sell rejected: {err}")
+                send_telegram(
+                    f"⚠️ *Stop-loss tried, sell rejected*\n{title}\n"
+                    f"{pct * 100:+.1f}% | {err[:150]}",
+                    self.config,
+                )
+
+        self.state["stop_loss_fired"] = list(self.stop_loss_fired)
+        save_state(self.state)
 
     def run(self) -> None:
         logger.info("=" * 60)
