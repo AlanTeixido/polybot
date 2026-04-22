@@ -491,7 +491,8 @@ def evaluate_market(
 
     skip_counts: optional dict mutated in-place to track why markets are skipped.
     Keys used: parse_failed, equal_paused, no_date, no_forecast, no_temp,
-    edge_too_small, entry_too_high, entry_too_low, market_extreme, no_yes_on_exact.
+    edge_too_small, entry_too_high, entry_too_low, market_extreme, no_yes_on_exact,
+    no_market_price, midpoint_no_liquidity.
     """
     def _tick(k: str) -> None:
         if skip_counts is not None and k in skip_counts:
@@ -499,7 +500,25 @@ def evaluate_market(
 
     title = market.get("question", "")
     market_id = market.get("id", "")
-    current_price = float(market.get("current_probability", market.get("current_price", 0.5)))
+
+    # Simmer's current_probability is the midpoint of best-bid/best-ask. For
+    # thinly-traded markets the spread can be 99¢/1¢ with midpoint 0.5 — an order
+    # at "midpoint" fills at the ask (e.g., buy NO at 99¢ when midpoint is 0.50).
+    # Trading at a missing or exact-0.5 price is unsafe; skip those markets.
+    _prob = market.get("current_probability")
+    if _prob is None:
+        _prob = market.get("current_price")
+    if _prob is None:
+        if verbose:
+            logger.info(f"  SKIP (no market price): {title[:70]}")
+        _tick("no_market_price")
+        return None
+    current_price = float(_prob)
+    if abs(current_price - 0.5) < 1e-9:
+        if verbose:
+            logger.info(f"  SKIP (midpoint 0.5 — likely no liquidity): {title[:70]}")
+        _tick("midpoint_no_liquidity")
+        return None
 
     parsed = parse_weather_market(title)
     if not parsed:
@@ -763,6 +782,8 @@ class WeatherBot:
             "entry_too_low": 0,
             "market_extreme": 0,
             "no_yes_on_exact": 0,
+            "no_market_price": 0,
+            "midpoint_no_liquidity": 0,
             "correlation_limit": 0,
             "bet_too_small": 0,
             "shares_below_min": 0,
