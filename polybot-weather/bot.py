@@ -326,12 +326,15 @@ def get_forecast(city: str) -> dict | None:
 def estimate_probability(forecast_temp: float, threshold: float, comparison: str, days_ahead: int = 1) -> float:
     """Estimate P(temp [comparison] threshold) using normal distribution.
 
-    Forecast error grows with horizon:
-    - 1 day: std ~1.5°C
-    - 3 days: std ~2.5°C
-    - 7 days: std ~3.5°C
+    Widened 2026-04-20 after observing 41% drift on N=9 trades (model
+    predicted ~0.94 avg, actual WR was 0.44). Old formula (1.5°C base,
+    1.8°C at 2d) underestimated forecast uncertainty. Real MAE for 2-day
+    forecasts is ~2-3°C. Post-widening tails:
+    - 1 day: std 2.5°C
+    - 3 days: std 3.0°C
+    - 7 days: std 5.0°C
     """
-    std = max(1.5, 1.0 + days_ahead * 0.4)  # linearly growing uncertainty
+    std = max(2.5, 1.5 + days_ahead * 0.5)  # linearly growing uncertainty
 
     if std == 0:
         return 1.0 if forecast_temp >= threshold else 0.0
@@ -358,8 +361,11 @@ def estimate_probability(forecast_temp: float, threshold: float, comparison: str
 def estimate_range_probability(
     forecast_temp: float, threshold_low: float, threshold_high: float, days_ahead: int = 1
 ) -> float:
-    """Estimate P(threshold_low <= temp <= threshold_high)."""
-    std = max(1.5, 1.0 + days_ahead * 0.4)
+    """Estimate P(threshold_low <= temp <= threshold_high).
+
+    Uses the same widened std_dev as estimate_probability (see note there).
+    """
+    std = max(2.5, 1.5 + days_ahead * 0.5)
     z_low = (threshold_low - forecast_temp) / std
     z_high = (threshold_high - forecast_temp) / std
     p_low = 0.5 * (1 + math.erf(z_low / math.sqrt(2)))
