@@ -1032,15 +1032,24 @@ class WeatherBot:
 
         new_alerts: list[tuple[dict, float]] = []
         for pos in positions:
-            mid = str(pos.get("market_id", ""))
             avg = float(pos.get("avg_price", 0) or 0)
             curr = float(pos.get("current_price", 0) or 0)
-            if not mid or mid in self.alerted_positions or avg <= 0:
+            title = str(pos.get("title", "")).strip()
+            size = float(pos.get("size", 0) or 0)
+            # Polymarket's data API returns market_id="" for most positions, so we
+            # key by title. Skip: resolved positions (curr at 0 or 1), dust (stake
+            # under $0.50), and missing metadata.
+            if avg <= 0 or curr <= 0 or curr >= 1 or not title:
+                continue
+            if avg * size < 0.50:
+                continue
+            key = title[:100]
+            if key in self.alerted_positions:
                 continue
             pnl_pct = (curr - avg) / avg
             if pnl_pct <= self.loss_alert_pct:
                 new_alerts.append((pos, pnl_pct))
-                self.alerted_positions.add(mid)
+                self.alerted_positions.add(key)
 
         for pos, pct in new_alerts:
             title = str(pos.get("title", ""))[:80]
