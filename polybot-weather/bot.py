@@ -528,9 +528,16 @@ def evaluate_market(
         _tick("no_market_price")
         return None
     current_price = float(_prob)
-    if abs(current_price - 0.5) < 1e-9:
+    # Widened 2026-04-22 from 1e-9 to ±0.05 after diagnostic confirmed bug:
+    # 10/14 trades in 48h had bot-calc entry 0.485-0.50 but executed at real
+    # ask of 96-99¢ (Buenos Aires NO @ 97¢, Singapore NO @ 99¢, Dallas YES
+    # @ 99¢, etc). Simmer's current_probability is bid-ask midpoint; thin
+    # markets with bid 0.99/ask 0.01 give midpoint exactly 0.50 and similar
+    # variations (0.485, 0.49). Any midpoint within 5¢ of 0.5 indicates
+    # unreliable price — refuse to trade.
+    if abs(current_price - 0.5) < 0.05:
         if verbose:
-            logger.info(f"  SKIP (midpoint 0.5 — likely no liquidity): {title[:70]}")
+            logger.info(f"  SKIP (midpoint {current_price:.3f} ~0.5, thin liquidity): {title[:70]}")
         _tick("midpoint_no_liquidity")
         return None
 
