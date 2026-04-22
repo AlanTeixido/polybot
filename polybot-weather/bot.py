@@ -31,6 +31,14 @@ CONFIG_PATH = os.path.join(HERE, "config.json")
 LOG_PATH = os.path.join(HERE, "weather-bot.log")
 STATE_PATH = os.path.join(HERE, "state.json")
 
+# Project root on sys.path so we can reuse shared helpers from tools/
+# (same pattern as polybot-crypto/bot.py).
+ROOT = os.path.dirname(HERE)
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from tools.polymarket import get_positions  # noqa: E402
+
 logger = logging.getLogger("weather-bot")
 logger.setLevel(logging.INFO)
 _fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
@@ -775,6 +783,11 @@ class WeatherBot:
         self.dry_run = config.get("dry_run", False)
         self.cycle_interval = int(config.get("cycle_interval_seconds", 180))
         self.currency = "USDC" if self.venue == "polymarket" else "$SIM"
+        # One-shot Telegram alert when an open position's unrealized P&L crosses
+        # this threshold. Config override: loss_alert_pct (float, negative).
+        # Alerted positions tracked in state to avoid re-alerts on the same market.
+        self.loss_alert_pct = float(config.get("loss_alert_pct", -0.10))
+        self.alerted_positions: set[str] = set(self.state.get("alerted_positions", []))
         # Skip counters — reset each summary window (~6h). Aggregate visibility
         # into why markets are filtered without needing verbose logging.
         self._skip_counts: dict[str, int] = {
@@ -999,6 +1012,52 @@ class WeatherBot:
                         f"⚠️ *Trade FAILED*\n{opp['title'][:80]}\n{err[:150]}",
                         self.config,
                     )
+
+        # Check for loss-threshold crossings on open positions (one-shot alerts).
+        self._check_loss_alerts()
+
+    def _check_loss_alerts(self) -> None:
+        """Send a one-time Telegram alert when any open position crosses
+        ``loss_alert_pct`` unrealized. Alerted market IDs persist in state so
+        the same position never triggers twice. Real-money venue only."""
+        if self.venue != "polymarket" or not self.wallet_address:
+            return
+        try:
+            positions = get_positions(
+                self.wallet_address, venue=self.venue, simmer_api_key=self.api_key
+            )
+        except Exception as e:
+            logger.warning(f"loss_alert fetch_positions failed: {e}")
+            return
+
+        new_alerts: list[tuple[dict, float]] = []
+        for pos in positions:
+            mid = str(pos.get("market_id", ""))
+            avg = float(pos.get("avg_price", 0) or 0)
+            curr = float(pos.get("current_price", 0) or 0)
+            if not mid or mid in self.alerted_positions or avg <= 0:
+                continue
+            pnl_pct = (curr - avg) / avg
+            if pnl_pct <= self.loss_alert_pct:
+                new_alerts.append((pos, pnl_pct))
+                self.alerted_positions.add(mid)
+
+        for pos, pct in new_alerts:
+            title = str(pos.get("title", ""))[:80]
+            side = str(pos.get("side", "")).upper()
+            msg = (
+                f"⚠️ *Position below {int(self.loss_alert_pct * 100)}%*\n"
+                f"{title}\n"
+                f"Side {side} | Entry {float(pos.get('avg_price', 0)):.2f} "
+                f"→ Current {float(pos.get('current_price', 0)):.2f}\n"
+                f"Unrealized: ${float(pos.get('unrealized_pnl', 0)):+.2f} ({pct * 100:+.1f}%)"
+            )
+            send_telegram(msg, self.config)
+            logger.info(f"Loss alert: {title[:50]} at {pct * 100:+.1f}%")
+
+        if new_alerts:
+            self.state["alerted_positions"] = list(self.alerted_positions)
+            save_state(self.state)
 
     def run(self) -> None:
         logger.info("=" * 60)
