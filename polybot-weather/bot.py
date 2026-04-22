@@ -458,7 +458,17 @@ def place_order(
     reason: str,
     venue: str = "sim",
     dry_run: bool = False,
+    order_type: str = "GTC",
 ) -> dict:
+    """Place a trade on Simmer.
+
+    order_type defaults to "GTC" (Good-Till-Cancelled). Previously the Simmer
+    default was FAK (Fill-and-Kill), which refuses any partial match and was
+    killing ~75% of weather-bot orders in thin markets — the order would be
+    rejected with "not filled at price X, no liquidity" even when an edge
+    existed. GTC sits in the book until someone fills it, so valid edges get
+    captured as long as counterparty appears.
+    """
     if dry_run:
         logger.info(f"[DRY RUN] {venue} {side} {amount} on {market_id}: {reason}")
         return {"executed": False, "dry_run": True}
@@ -473,6 +483,7 @@ def place_order(
                 "venue": venue,
                 "reasoning": reason[:200],
                 "source": "sdk:weather-bot",
+                "order_type": order_type,
             },
             timeout=REQUEST_TIMEOUT,
         )
