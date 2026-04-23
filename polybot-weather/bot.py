@@ -1231,8 +1231,11 @@ class WeatherBot:
             pct = pnl / cost
 
             # Update the running peak for this market (only upward). This feeds
-            # the trailing stop below.
-            prev_peak = self.position_peaks.get(mid, pct)
+            # the trailing stop below. First observation must always insert,
+            # so we use -inf as the missing-key default instead of pct itself
+            # (using pct would make the "pct > prev_peak" check evaluate as
+            # pct > pct which is false, leaving the map empty forever).
+            prev_peak = self.position_peaks.get(mid, float("-inf"))
             if pct > prev_peak:
                 self.position_peaks[mid] = pct
                 prev_peak = pct
