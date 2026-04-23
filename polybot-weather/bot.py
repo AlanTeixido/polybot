@@ -669,13 +669,33 @@ def evaluate_market(
     # Entry price is the side we're buying
     entry_price = current_price if side == "yes" else (1 - current_price)
 
-    # Entry price gate: reject trades with terrible risk/reward
-    # Polymarket 0.55: win pays 82% per trade, break-even WR = 55% (vs current 72%)
-    # SIM 0.75: more relaxed since SIM is virtual
-    max_entry = 0.75 if venue_hint != "polymarket" else 0.55
+    # Entry price gate: tiered by edge magnitude. Stronger conviction earns
+    # a higher max_entry because a bigger edge compensates for the worse
+    # risk/reward at higher prices.
+    #
+    #   edge ≥ 0.50 → max_entry 0.75 (strong conviction, allow 75¢ entries)
+    #   edge ≥ 0.35 → max_entry 0.65
+    #   else        → max_entry 0.55 (conservative default)
+    #
+    # Rationale: under the flat 0.55 cap we were blocking historic winners
+    # like Miami 78-79°F NO (entry 0.68, +$29) and Toronto 17°C NO
+    # (entry 0.74, +$15). Both had edges >>30% — the bigger edge is the
+    # right way to justify paying more per share.
+    # SIM ignores the tiering since the bot is already conservative there.
+    if venue_hint != "polymarket":
+        max_entry = 0.75
+    elif abs_edge >= 0.50:
+        max_entry = 0.75
+    elif abs_edge >= 0.35:
+        max_entry = 0.65
+    else:
+        max_entry = 0.55
     if entry_price > max_entry:
         if verbose:
-            logger.info(f"  SKIP (entry {entry_price:.2f} > {max_entry}): {title[:60]}")
+            logger.info(
+                f"  SKIP (entry {entry_price:.2f} > {max_entry} "
+                f"for edge {abs_edge:.2f}): {title[:60]}"
+            )
         _tick("entry_too_high")
         return None
 
@@ -841,6 +861,19 @@ class WeatherBot:
         # via either path it never retries. Disable with take_profit_enabled=false.
         self.take_profit_enabled = bool(config.get("take_profit_enabled", True))
         self.take_profit_pct = float(config.get("take_profit_pct", 0.50))
+        # Trailing stop-loss. Locks in peak unrealized gains when the market
+        # swings back. Unlike the fixed take-profit, this follows the position's
+        # own high-water mark so a winner that keeps climbing is allowed to
+        # climb — we only exit when it drops trailing_stop_drop_pct from its
+        # observed peak, and only after reaching trailing_stop_activate_pct.
+        # Motivated by Panama City 31°C NO: peaked at +54% unrealized ($30.25
+        # from $19.59), fell back to +0% the same day. With trailing -20%
+        # from a +25% activation, we would have sold near +34% locking in
+        # ~$6.66 realized.
+        self.trailing_stop_enabled = bool(config.get("trailing_stop_enabled", True))
+        self.trailing_stop_activate_pct = float(config.get("trailing_stop_activate_pct", 0.25))
+        self.trailing_stop_drop_pct = float(config.get("trailing_stop_drop_pct", 0.20))
+        self.position_peaks: dict[str, float] = dict(self.state.get("position_peaks", {}))
         # Skip counters — reset each summary window (~6h). Aggregate visibility
         # into why markets are filtered without needing verbose logging.
         self._skip_counts: dict[str, int] = {
@@ -996,7 +1029,18 @@ class WeatherBot:
             # exactly 10.5¢. Posting at 10.5¢ + slippage = 15.5¢ would have
             # captured the whole intended stake.
             _slippage = float(self.config.get("buy_slippage", 0.05))
-            _max_entry = 0.55 if self.venue == "polymarket" else 0.75
+            # Match the tiered max_entry used in evaluate_market so a trade
+            # approved at edge 0.50 with entry 0.70 does not get clamped back
+            # to 0.55 and left unfilled.
+            _abs_edge = abs(opp.get("edge", 0))
+            if self.venue != "polymarket":
+                _max_entry = 0.75
+            elif _abs_edge >= 0.50:
+                _max_entry = 0.75
+            elif _abs_edge >= 0.35:
+                _max_entry = 0.65
+            else:
+                _max_entry = 0.55
             buy_price = max(0.01, min(_entry + _slippage, _max_entry, 0.99))
             buy_price = round(buy_price, 2)
             logger.info(
@@ -1158,7 +1202,7 @@ class WeatherBot:
         unrealized in 3h and fell back to +0% the same day, erasing ~$10.75
         of paper gain. A threshold-based exit locks in volatile swings before
         they unwind."""
-        if not (self.stop_loss_enabled or self.take_profit_enabled):
+        if not (self.stop_loss_enabled or self.take_profit_enabled or self.trailing_stop_enabled):
             return
         if self.venue != "polymarket":
             return
@@ -1185,13 +1229,33 @@ class WeatherBot:
                 continue
             pct = pnl / cost
 
-            # Classify which exit (if any) triggered.
+            # Update the running peak for this market (only upward). This feeds
+            # the trailing stop below.
+            prev_peak = self.position_peaks.get(mid, pct)
+            if pct > prev_peak:
+                self.position_peaks[mid] = pct
+                prev_peak = pct
+
+            # Classify which exit (if any) triggered. Order matters: stop_loss
+            # wins if both a stop-loss and a trailing-stop trigger coincide
+            # because the fixed stop is the harder safety net.
+            trailing_armed = (
+                self.trailing_stop_enabled
+                and prev_peak >= self.trailing_stop_activate_pct
+                and pct <= prev_peak - self.trailing_stop_drop_pct
+            )
             if self.stop_loss_enabled and pct <= self.stop_loss_pct:
                 trigger = "stop_loss"
                 threshold = self.stop_loss_pct
                 tg_icon = "🛑"
                 tg_label = "Stop-loss fired"
                 reject_label = "Stop-loss tried, sell rejected"
+            elif trailing_armed:
+                trigger = "trailing_stop"
+                threshold = prev_peak - self.trailing_stop_drop_pct
+                tg_icon = "📉"
+                tg_label = f"Trailing stop fired (peak {prev_peak * 100:+.0f}%)"
+                reject_label = "Trailing stop tried, sell rejected"
             elif self.take_profit_enabled and pct >= self.take_profit_pct:
                 trigger = "take_profit"
                 threshold = self.take_profit_pct
@@ -1271,6 +1335,11 @@ class WeatherBot:
             )
 
         self.state["stop_loss_fired"] = list(self.stop_loss_fired)
+        # Keep the peak map bounded to markets we still track — drop entries
+        # for markets that exited or are not in the active list any more.
+        active_ids = {str(p.get("market_id", "")) for p in positions if p.get("market_id")}
+        self.position_peaks = {k: v for k, v in self.position_peaks.items() if k in active_ids}
+        self.state["position_peaks"] = self.position_peaks
         save_state(self.state)
 
     def run(self) -> None:
