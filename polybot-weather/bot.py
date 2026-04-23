@@ -1326,9 +1326,13 @@ class WeatherBot:
             exposure = venue_port.get("total_exposure")
             pnl_total = venue_port.get("pnl")
 
+            # status=all covers both "resolved" (market closed, not redeemed yet)
+            # and "closed" (redeemed / finalised). Querying only status=resolved
+            # misses the wins that auto-redeemed and moved to closed — the bulk
+            # of our victories. Dashboard's "Redeemed(N)" tab is the closed bucket.
             pos_resp = SESSION.get(
                 f"{SIMMER_API}/positions",
-                params={"venue": self.venue, "status": "resolved"},
+                params={"venue": self.venue, "status": "all"},
                 headers=h,
                 timeout=REQUEST_TIMEOUT,
             ).json()
@@ -1340,7 +1344,7 @@ class WeatherBot:
             # CS:GO markets, etc.) that would pollute the W/L here. Filter by
             # source containing "weather-bot"; empty sources are also legacy.
             for p in pos_resp.get("positions", []):
-                if p.get("status") != "resolved":
+                if p.get("status") == "active":
                     continue
                 srcs = p.get("sources") or []
                 if not any("weather-bot" in s for s in srcs):
