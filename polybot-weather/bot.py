@@ -1314,8 +1314,6 @@ class WeatherBot:
         pnl_total = None
         pnl_realized = None
         pnl_unrealized = None
-        wins = 0
-        losses = 0
         try:
             h = {"Authorization": f"Bearer {self.api_key}"}
             port = SESSION.get(
@@ -1326,10 +1324,6 @@ class WeatherBot:
             exposure = venue_port.get("total_exposure")
             pnl_total = venue_port.get("pnl")
 
-            # status=all covers both "resolved" (market closed, not redeemed yet)
-            # and "closed" (redeemed / finalised). Querying only status=resolved
-            # misses the wins that auto-redeemed and moved to closed — the bulk
-            # of our victories. Dashboard's "Redeemed(N)" tab is the closed bucket.
             pos_resp = SESSION.get(
                 f"{SIMMER_API}/positions",
                 params={"venue": self.venue, "status": "all"},
@@ -1339,21 +1333,6 @@ class WeatherBot:
             pnl_sum = pos_resp.get("pnl_summary", {}).get(self.venue, {})
             pnl_realized = pnl_sum.get("realized")
             pnl_unrealized = pnl_sum.get("unrealized")
-            # Only count positions this bot actually opened. Simmer's /positions
-            # also returns legacy agent.py experiments (multi-strategy-v2, test,
-            # CS:GO markets, etc.) that would pollute the W/L here. Filter by
-            # source containing "weather-bot"; empty sources are also legacy.
-            for p in pos_resp.get("positions", []):
-                if p.get("status") == "active":
-                    continue
-                srcs = p.get("sources") or []
-                if not any("weather-bot" in s for s in srcs):
-                    continue
-                p_pnl = p.get("pnl") or 0
-                if p_pnl > 0:
-                    wins += 1
-                elif p_pnl < 0:
-                    losses += 1
         except Exception as e:
             logger.warning(f"Summary fetch from Simmer failed: {e}")
 
@@ -1363,14 +1342,18 @@ class WeatherBot:
             exposure = 0.0
 
         total_value = (liquid or 0) + (exposure or 0)
-        wr = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
 
+        # W/L deliberately omitted: Simmer's SDK does not expose per-venue
+        # win/loss counts (agents/me returns polymarket_win_count=None), and
+        # per-position counting disagrees with the dashboard's per-trade
+        # rendering by design — showing the bot's number was more confusing
+        # than useful. PnL is the authoritative metric; when the dashboard is
+        # fresh it matches to the cent.
         msg_parts = [
             "📊 *Weather Bot Summary*",
             f"Total value: {total_value:.2f} {self.currency}",
             f"  Liquid: {liquid:.2f} | In positions: {(exposure or 0):.2f}",
             f"Trades placed: {total}",
-            f"Markets resolved: {wins}W / {losses}L (WR: {wr:.0f}%)",
         ]
         if pnl_total is not None:
             if pnl_realized is not None and pnl_unrealized is not None:
