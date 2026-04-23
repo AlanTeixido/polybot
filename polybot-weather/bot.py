@@ -834,6 +834,13 @@ class WeatherBot:
         self.stop_loss_enabled = bool(config.get("stop_loss_enabled", True))
         self.stop_loss_pct = float(config.get("stop_loss_pct", -0.10))
         self.stop_loss_fired: set[str] = set(self.state.get("stop_loss_fired", []))
+        # Bot-side take-profit. Unrealized gains on weather markets can swing
+        # wildly before resolution (observed: Panama City +54% → -0% in 5h).
+        # When pnl / cost_basis >= take_profit_pct the bot sells to lock in
+        # the gain. Shares the stop_loss_fired set so once a position exits
+        # via either path it never retries. Disable with take_profit_enabled=false.
+        self.take_profit_enabled = bool(config.get("take_profit_enabled", True))
+        self.take_profit_pct = float(config.get("take_profit_pct", 0.50))
         # Skip counters — reset each summary window (~6h). Aggregate visibility
         # into why markets are filtered without needing verbose logging.
         self._skip_counts: dict[str, int] = {
@@ -1078,8 +1085,8 @@ class WeatherBot:
         # Check for loss-threshold crossings on open positions (one-shot alerts).
         self._check_loss_alerts()
 
-        # Bot-side stop-loss: sell anything that crossed the pain threshold.
-        self._check_stop_loss()
+        # Bot-side exits: stop-loss (pain threshold) and take-profit (gain lock).
+        self._check_position_exits()
 
     def _check_loss_alerts(self) -> None:
         """Send a one-time Telegram alert when any open position crosses
@@ -1142,13 +1149,16 @@ class WeatherBot:
             self.state["alerted_positions"] = list(self.alerted_positions)
             save_state(self.state)
 
-    def _check_stop_loss(self) -> None:
-        """Bot-side stop-loss. Fetches open positions from Simmer's positions
-        endpoint (which unlike data-api.polymarket.com returns live SDK-placed
-        positions) and sells any with unrealized pnl / cost_basis below
-        stop_loss_pct. One-shot per market: once we attempt to close a market
-        the ID goes into stop_loss_fired and is never re-tried."""
-        if not self.stop_loss_enabled:
+    def _check_position_exits(self) -> None:
+        """Stop-loss + take-profit in one pass. Sells positions whose unrealized
+        pnl / cost_basis is below stop_loss_pct or above take_profit_pct. The
+        same stop_loss_fired set tracks both so a market never double-retries.
+
+        Observed motivation for take-profit: Panama City 31°C NO hit +54%
+        unrealized in 3h and fell back to +0% the same day, erasing ~$10.75
+        of paper gain. A threshold-based exit locks in volatile swings before
+        they unwind."""
+        if not (self.stop_loss_enabled or self.take_profit_enabled):
             return
         if self.venue != "polymarket":
             return
@@ -1162,7 +1172,7 @@ class WeatherBot:
             resp.raise_for_status()
             positions = resp.json().get("positions", [])
         except Exception as e:
-            logger.warning(f"stop_loss fetch_positions failed: {e}")
+            logger.warning(f"position_exits fetch_positions failed: {e}")
             return
 
         for pos in positions:
@@ -1174,7 +1184,21 @@ class WeatherBot:
             if cost <= 0:
                 continue
             pct = pnl / cost
-            if pct > self.stop_loss_pct:
+
+            # Classify which exit (if any) triggered.
+            if self.stop_loss_enabled and pct <= self.stop_loss_pct:
+                trigger = "stop_loss"
+                threshold = self.stop_loss_pct
+                tg_icon = "🛑"
+                tg_label = "Stop-loss fired"
+                reject_label = "Stop-loss tried, sell rejected"
+            elif self.take_profit_enabled and pct >= self.take_profit_pct:
+                trigger = "take_profit"
+                threshold = self.take_profit_pct
+                tg_icon = "💰"
+                tg_label = "Take-profit fired"
+                reject_label = "Take-profit tried, sell rejected"
+            else:
                 continue
 
             shares_yes = float(pos.get("shares_yes") or 0)
@@ -1189,19 +1213,16 @@ class WeatherBot:
                 continue
 
             title = str(pos.get("question") or "")[:80]
-            # Current per-share market value (side-correct, always present).
-            # Falls back to avg_cost if size is zero to avoid division-by-zero.
             current_value = float(pos.get("current_value") or 0)
             raw_price = (current_value / shares) if shares > 0 else float(pos.get("avg_cost") or 0.5)
             # Aggressive-sell slippage: post limit below best bid so the GTC
-            # order sweeps through bids instead of parking at the mark and
-            # waiting. Matters more for sells than buys: the whole point is
-            # to exit fast when a position crosses the pain threshold.
+            # order sweeps through bids instead of parking at the mark.
             _sell_slippage = float(self.config.get("sell_slippage", 0.05))
             sell_price = max(0.01, round(raw_price - _sell_slippage, 2))
-            reason = f"stop_loss: pnl {pct * 100:+.1f}% <= {self.stop_loss_pct * 100:.0f}%"
+            op = "<=" if trigger == "stop_loss" else ">="
+            reason = f"{trigger}: pnl {pct * 100:+.1f}% {op} {threshold * 100:+.0f}%"
             logger.info(
-                f"STOP-LOSS [{side.upper()} {shares:.2f} shares @ {sell_price:.3f}]: "
+                f"{trigger.upper()} [{side.upper()} {shares:.2f} shares @ {sell_price:.3f}]: "
                 f"{title[:50]} | {reason}"
             )
             result = place_order(
@@ -1214,15 +1235,14 @@ class WeatherBot:
                 dry_run=self.dry_run,
                 action="sell",
                 shares=round(shares, 4),
-                source="sdk:weather-bot:stop-loss",
+                source=f"sdk:weather-bot:{trigger}",
                 price=sell_price,
             )
 
             if result.get("executed"):
-                # Definitive: order accepted. Do not retry.
                 self.stop_loss_fired.add(mid)
                 send_telegram(
-                    f"🛑 *Stop-loss fired*\n{title}\n"
+                    f"{tg_icon} *{tg_label}*\n{title}\n"
                     f"Side {side.upper()} | {shares:.2f} shares @ {float(pos.get('avg_cost', 0)):.3f}\n"
                     f"Unrealized: ${pnl:+.2f} ({pct * 100:+.1f}%)\n"
                     f"Sell order placed (GTC) @ {round(sell_price, 2)}",
@@ -1232,25 +1252,20 @@ class WeatherBot:
 
             err = str(result.get("error", "unknown"))
             err_lower = err.lower()
-            # Transient / fixable errors: DO NOT mark fired, let next cycle retry
-            # with a fresh price. Tick size violations happen when Simmer's
-            # default price is fractional; timeouts and 5xx are pure transient.
+            # Transient / fixable errors: retry next cycle at a fresh price.
             is_transient = any(kw in err_lower for kw in [
                 "timed out", "timeout", "httpsconnectionpool", "tick size",
                 "503", "502", "504", "gateway", "connection reset",
             ])
             if is_transient:
-                logger.warning(f"stop_loss transient error (will retry): {err[:200]}")
-                # No Telegram spam on retries — would flood if the endpoint is
-                # down for 10 min.
+                logger.warning(f"{trigger} transient error (will retry): {err[:200]}")
                 continue
 
-            # Legitimate rejection (insufficient shares, order invalid for
-            # non-tick reasons, etc.) → mark fired so we stop retrying.
+            # Legitimate rejection: give up on this market.
             self.stop_loss_fired.add(mid)
-            logger.warning(f"stop_loss sell rejected (giving up on this market): {err[:200]}")
+            logger.warning(f"{trigger} sell rejected (giving up): {err[:200]}")
             send_telegram(
-                f"⚠️ *Stop-loss tried, sell rejected*\n{title}\n"
+                f"⚠️ *{reject_label}*\n{title}\n"
                 f"{pct * 100:+.1f}% | {err[:150]}",
                 self.config,
             )
