@@ -1301,21 +1301,73 @@ class WeatherBot:
         send_telegram("*Weather Bot stopped*", self.config)
 
     def _send_summary(self) -> None:
-        """Send periodic Telegram summary with balance + stats + skip counters."""
-        bal = fetch_balance(self.api_key, venue=self.venue, wallet_address=self.wallet_address)
-        wins = self.state.get("wins", 0)
-        losses = self.state.get("losses", 0)
-        pnl = self.state.get("pnl", 0.0)
+        """Send periodic Telegram summary with balance + stats + skip counters.
+
+        Stats come from Simmer's portfolio + positions endpoints rather than the
+        bot's state.json counters. The bot never reliably tracked wins/losses in
+        state (Simmer settles async and the bot did not have a resolution hook),
+        so state.wins / state.losses always read as 0. Pulling from Simmer gives
+        the same numbers the dashboard shows."""
         total = self.state.get("total_trades", 0)
+        liquid = None
+        exposure = None
+        pnl_total = None
+        pnl_realized = None
+        pnl_unrealized = None
+        wins = 0
+        losses = 0
+        try:
+            h = {"Authorization": f"Bearer {self.api_key}"}
+            port = SESSION.get(
+                f"{SIMMER_API}/portfolio", headers=h, timeout=REQUEST_TIMEOUT
+            ).json()
+            venue_port = port.get(self.venue, {}) if isinstance(port, dict) else {}
+            liquid = venue_port.get("balance")
+            exposure = venue_port.get("total_exposure")
+            pnl_total = venue_port.get("pnl")
+
+            pos_resp = SESSION.get(
+                f"{SIMMER_API}/positions",
+                params={"venue": self.venue, "status": "resolved"},
+                headers=h,
+                timeout=REQUEST_TIMEOUT,
+            ).json()
+            pnl_sum = pos_resp.get("pnl_summary", {}).get(self.venue, {})
+            pnl_realized = pnl_sum.get("realized")
+            pnl_unrealized = pnl_sum.get("unrealized")
+            for p in pos_resp.get("positions", []):
+                if p.get("status") == "resolved":
+                    p_pnl = p.get("pnl") or 0
+                    if p_pnl > 0:
+                        wins += 1
+                    elif p_pnl < 0:
+                        losses += 1
+        except Exception as e:
+            logger.warning(f"Summary fetch from Simmer failed: {e}")
+
+        if liquid is None:
+            # Fall back to on-chain balance only (no position value)
+            liquid = fetch_balance(self.api_key, venue=self.venue, wallet_address=self.wallet_address)
+            exposure = 0.0
+
+        total_value = (liquid or 0) + (exposure or 0)
         wr = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
 
         msg_parts = [
             "📊 *Weather Bot Summary*",
-            f"Balance: {bal:.2f} {self.currency}",
-            f"Total trades: {total}",
-            f"Wins/Losses: {wins}W / {losses}L (WR: {wr:.0f}%)",
-            f"PnL: {pnl:+.2f} {self.currency}",
+            f"Total value: {total_value:.2f} {self.currency}",
+            f"  Liquid: {liquid:.2f} | In positions: {(exposure or 0):.2f}",
+            f"Trades placed: {total}",
+            f"Resolved: {wins}W / {losses}L (WR: {wr:.0f}%)",
         ]
+        if pnl_total is not None:
+            if pnl_realized is not None and pnl_unrealized is not None:
+                msg_parts.append(
+                    f"PnL: {pnl_total:+.2f} {self.currency} "
+                    f"(realized {pnl_realized:+.2f} + unrealized {pnl_unrealized:+.2f})"
+                )
+            else:
+                msg_parts.append(f"PnL: {pnl_total:+.2f} {self.currency}")
 
         # Skip counters for the current window
         nonzero = [(k, v) for k, v in self._skip_counts.items() if v > 0]
