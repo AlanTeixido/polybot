@@ -981,11 +981,26 @@ class WeatherBot:
                 f"(days_ahead={opp['days_ahead']}). "
                 f"P_real={opp['p_yes_real']}, market={opp['market_price']:.2f}, edge={opp['edge']:+.2f}"
             )
-            logger.info(f"TRADE [{self.venue}]: {opp['side'].upper()} {bet}{self.currency} on '{opp['title'][:60]}' | {reason}")
+            # Aggressive-fill price: post a limit above the best ask so the GTC
+            # order sweeps book depth instead of parking at midpoint. Capped at
+            # max_entry so slippage cannot push us into the 99¢-trap zone.
+            # Observed problem: Seattle 2026-04-21 placed $2.84 at 10.5¢ midpoint,
+            # FAK filled only 1.71 shares ($0.19) because book had no depth at
+            # exactly 10.5¢. Posting at 10.5¢ + slippage = 15.5¢ would have
+            # captured the whole intended stake.
+            _slippage = float(self.config.get("buy_slippage", 0.05))
+            _max_entry = 0.55 if self.venue == "polymarket" else 0.75
+            buy_price = max(0.01, min(_entry + _slippage, _max_entry, 0.99))
+            buy_price = round(buy_price, 2)
+            logger.info(
+                f"TRADE [{self.venue}]: {opp['side'].upper()} {bet}{self.currency} "
+                f"on '{opp['title'][:60]}' | {reason} | limit {buy_price:.2f}"
+            )
 
             result = place_order(
                 self.api_key, opp["market_id"], opp["side"], bet, reason,
                 venue=self.venue, dry_run=self.dry_run,
+                price=buy_price,
             )
 
             if result.get("executed"):
@@ -1177,7 +1192,13 @@ class WeatherBot:
             # Current per-share market value (side-correct, always present).
             # Falls back to avg_cost if size is zero to avoid division-by-zero.
             current_value = float(pos.get("current_value") or 0)
-            sell_price = (current_value / shares) if shares > 0 else float(pos.get("avg_cost") or 0.5)
+            raw_price = (current_value / shares) if shares > 0 else float(pos.get("avg_cost") or 0.5)
+            # Aggressive-sell slippage: post limit below best bid so the GTC
+            # order sweeps through bids instead of parking at the mark and
+            # waiting. Matters more for sells than buys: the whole point is
+            # to exit fast when a position crosses the pain threshold.
+            _sell_slippage = float(self.config.get("sell_slippage", 0.05))
+            sell_price = max(0.01, round(raw_price - _sell_slippage, 2))
             reason = f"stop_loss: pnl {pct * 100:+.1f}% <= {self.stop_loss_pct * 100:.0f}%"
             logger.info(
                 f"STOP-LOSS [{side.upper()} {shares:.2f} shares @ {sell_price:.3f}]: "
