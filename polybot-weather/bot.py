@@ -866,12 +866,13 @@ class WeatherBot:
         # own high-water mark so a winner that keeps climbing is allowed to
         # climb — we only exit when it drops trailing_stop_drop_pct from its
         # observed peak, and only after reaching trailing_stop_activate_pct.
-        # Motivated by Panama City 31°C NO: peaked at +54% unrealized ($30.25
-        # from $19.59), fell back to +0% the same day. With trailing -20%
-        # from a +25% activation, we would have sold near +34% locking in
-        # ~$6.66 realized.
+        # Activation at +10% (default) catches even modest winners before
+        # they give back gains. Panama City 31°C NO peaked at +54% unrealized
+        # and fell back to 0% the same day; with activate=+10% / drop=-20%
+        # the trailing fires once the peak minus 20% is breached (e.g. peak
+        # 54% → fires at 34% locking in ~+34%, peak 15% → fires at -5%).
         self.trailing_stop_enabled = bool(config.get("trailing_stop_enabled", True))
-        self.trailing_stop_activate_pct = float(config.get("trailing_stop_activate_pct", 0.25))
+        self.trailing_stop_activate_pct = float(config.get("trailing_stop_activate_pct", 0.10))
         self.trailing_stop_drop_pct = float(config.get("trailing_stop_drop_pct", 0.20))
         self.position_peaks: dict[str, float] = dict(self.state.get("position_peaks", {}))
         # Skip counters — reset each summary window (~6h). Aggregate visibility
