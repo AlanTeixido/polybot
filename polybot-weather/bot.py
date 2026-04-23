@@ -462,11 +462,17 @@ def place_order(
     action: str = "buy",
     shares: float | None = None,
     source: str = "sdk:weather-bot",
+    price: float | None = None,
 ) -> dict:
     """Place a trade on Simmer.
 
     action="buy" (default): open a position, size = amount USDC.
     action="sell": close/reduce a position, size = shares (preferred) or amount USDC.
+
+    price: Polymarket requires tick-aligned limit prices (0.01 increment). If
+    caller supplies a price, we round to 2 decimals before sending. Without
+    this Simmer's server-side default ended up with fractional values like
+    0.139 which the CLOB rejected with "breaks minimum tick size rule: 0.01".
 
     order_type defaults to "GTC" (Good-Till-Cancelled). Previously the Simmer
     default was FAK (Fill-and-Kill), which refuses any partial match and was
@@ -491,6 +497,8 @@ def place_order(
         payload["shares"] = shares
     else:
         payload["amount"] = amount
+    if price is not None:
+        payload["price"] = round(float(price), 2)
     try:
         resp = SESSION.post(
             f"{SIMMER_API}/trade",
@@ -1039,11 +1047,12 @@ class WeatherBot:
 
                 # Only notify on REAL errors. These are non-actionable noise:
                 # - too small / below minimum: Kelly bet under 5-share floor (not a problem)
-                # - no asks / order book: thin liquidity, normal, bot skips to next market
+                # - no asks / order book / insufficient shares: thin liquidity, normal
                 # - too high / correlation / already / spread / no stacking: pre-existing filters
                 is_silent = is_network or is_balance or any(kw in err_lower for kw in [
                     "too high", "correlation", "already", "spread too high", "no stacking",
                     "too small", "below minimum", "no asks", "order book", "rounding",
+                    "insufficient shares",
                 ])
                 if self.venue == "polymarket" and not is_silent:
                     send_telegram(
@@ -1165,8 +1174,15 @@ class WeatherBot:
                 continue
 
             title = str(pos.get("question") or "")[:80]
+            # Current per-share market value (side-correct, always present).
+            # Falls back to avg_cost if size is zero to avoid division-by-zero.
+            current_value = float(pos.get("current_value") or 0)
+            sell_price = (current_value / shares) if shares > 0 else float(pos.get("avg_cost") or 0.5)
             reason = f"stop_loss: pnl {pct * 100:+.1f}% <= {self.stop_loss_pct * 100:.0f}%"
-            logger.info(f"STOP-LOSS [{side.upper()} {shares:.2f} shares]: {title[:50]} | {reason}")
+            logger.info(
+                f"STOP-LOSS [{side.upper()} {shares:.2f} shares @ {sell_price:.3f}]: "
+                f"{title[:50]} | {reason}"
+            )
             result = place_order(
                 self.api_key,
                 mid,
@@ -1178,28 +1194,45 @@ class WeatherBot:
                 action="sell",
                 shares=round(shares, 4),
                 source="sdk:weather-bot:stop-loss",
+                price=sell_price,
             )
 
-            # Mark the market as fired regardless of fill outcome to avoid
-            # retry storms on stuck orders. A failed sell still consumed one
-            # Simmer request.
-            self.stop_loss_fired.add(mid)
             if result.get("executed"):
+                # Definitive: order accepted. Do not retry.
+                self.stop_loss_fired.add(mid)
                 send_telegram(
                     f"🛑 *Stop-loss fired*\n{title}\n"
                     f"Side {side.upper()} | {shares:.2f} shares @ {float(pos.get('avg_cost', 0)):.3f}\n"
                     f"Unrealized: ${pnl:+.2f} ({pct * 100:+.1f}%)\n"
-                    f"Sell order placed (GTC)",
+                    f"Sell order placed (GTC) @ {round(sell_price, 2)}",
                     self.config,
                 )
-            else:
-                err = result.get("error", "unknown")
-                logger.warning(f"stop_loss sell rejected: {err}")
-                send_telegram(
-                    f"⚠️ *Stop-loss tried, sell rejected*\n{title}\n"
-                    f"{pct * 100:+.1f}% | {err[:150]}",
-                    self.config,
-                )
+                continue
+
+            err = str(result.get("error", "unknown"))
+            err_lower = err.lower()
+            # Transient / fixable errors: DO NOT mark fired, let next cycle retry
+            # with a fresh price. Tick size violations happen when Simmer's
+            # default price is fractional; timeouts and 5xx are pure transient.
+            is_transient = any(kw in err_lower for kw in [
+                "timed out", "timeout", "httpsconnectionpool", "tick size",
+                "503", "502", "504", "gateway", "connection reset",
+            ])
+            if is_transient:
+                logger.warning(f"stop_loss transient error (will retry): {err[:200]}")
+                # No Telegram spam on retries — would flood if the endpoint is
+                # down for 10 min.
+                continue
+
+            # Legitimate rejection (insufficient shares, order invalid for
+            # non-tick reasons, etc.) → mark fired so we stop retrying.
+            self.stop_loss_fired.add(mid)
+            logger.warning(f"stop_loss sell rejected (giving up on this market): {err[:200]}")
+            send_telegram(
+                f"⚠️ *Stop-loss tried, sell rejected*\n{title}\n"
+                f"{pct * 100:+.1f}% | {err[:150]}",
+                self.config,
+            )
 
         self.state["stop_loss_fired"] = list(self.stop_loss_fired)
         save_state(self.state)

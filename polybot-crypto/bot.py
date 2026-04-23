@@ -505,6 +505,17 @@ def cycle(config: dict, state: dict, cycle_num: int) -> None:
 
 def main():
     config = load_config()
+    # Kill switch: set "enabled": false in config to park the bot without
+    # letting the supervisor thrash it with restart loops. The process stays
+    # alive and sleeps, so supervisor backoff never kicks in. Re-enable by
+    # flipping the flag and sending SIGTERM (or letting the supervisor cycle).
+    if not config.get("enabled", True):
+        logger.info("=" * 60)
+        logger.info("CRYPTO BOT DISABLED via config.enabled=false — sleeping")
+        logger.info("=" * 60)
+        while True:
+            time.sleep(300)
+
     state = load_state()
     interval = int(config.get("cycle_interval_seconds", 30))
     logger.info("=" * 60)
