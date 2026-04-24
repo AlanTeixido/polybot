@@ -897,6 +897,21 @@ class WeatherBot:
         self.dry_run = config.get("dry_run", False)
         self.cycle_interval = int(config.get("cycle_interval_seconds", 180))
         self.currency = "USDC" if self.venue == "polymarket" else "$SIM"
+        # Daily loss circuit breaker. If the bot's realized PnL inside a UTC
+        # day (tracked in-memory since startup_of_day_pnl) drops below
+        # daily_loss_limit, stop opening NEW buys for the rest of the day.
+        # Stop-loss / take-profit / trailing exits still run so losing
+        # positions can still be closed. Resets at 00:00 UTC automatically.
+        # Inspired by polymarket-kalshi-weather-bot's $300 loss limit; our
+        # default is -$20 because we're running ~$400 bankroll, not $10k.
+        self.daily_loss_limit_usdc = float(config.get("daily_loss_limit_usdc", -20.0))
+        self._day_start_pnl: float | None = None
+        self._day_key: str = ""  # YYYY-MM-DD UTC
+        # Cap on total open positions. With full-market pagination (1000
+        # markets/cycle) the bot can accumulate positions faster than they
+        # resolve, which inflates fee spend and concentration risk. Skip
+        # new buys once this many SDK-placed positions are open.
+        self.max_active_positions = int(config.get("max_active_positions", 25))
         # One-shot Telegram alert when an open position's unrealized P&L crosses
         # this threshold. Config override: loss_alert_pct (float, negative).
         # Alerted positions tracked in state to avoid re-alerts on the same market.
@@ -1051,6 +1066,57 @@ class WeatherBot:
             return
 
         logger.info(f"Found {len(opportunities)} opportunities")
+
+        # ── PRE-TRADE GUARDS ────────────────────────────────────────────
+        # 1. Daily loss circuit breaker. Track realized PnL change since
+        #    start of UTC day; pause new buys if threshold breached.
+        # 2. Max active positions cap. Block new buys when concentration
+        #    exceeds the limit (exits still run).
+        now_day = time.strftime("%Y-%m-%d", time.gmtime())
+        circuit_broken = False
+        position_count = None
+        try:
+            h = {"Authorization": f"Bearer {self.api_key}"}
+            pos_resp = SESSION.get(
+                f"{SIMMER_API}/positions",
+                params={"venue": self.venue, "status": "active"},
+                headers=h,
+                timeout=REQUEST_TIMEOUT,
+            ).json()
+            position_count = pos_resp.get("position_counts", {}).get("active")
+            if position_count is None:
+                position_count = len(pos_resp.get("positions", []) or [])
+            pnl_sum = pos_resp.get("pnl_summary", {}).get(self.venue, {})
+            current_realized = pnl_sum.get("realized")
+            if current_realized is not None:
+                if self._day_key != now_day:
+                    self._day_key = now_day
+                    self._day_start_pnl = float(current_realized)
+                if self._day_start_pnl is not None:
+                    delta = float(current_realized) - self._day_start_pnl
+                    if delta <= self.daily_loss_limit_usdc:
+                        circuit_broken = True
+                        logger.warning(
+                            f"Circuit breaker active: realized PnL today {delta:+.2f} "
+                            f"<= limit {self.daily_loss_limit_usdc:+.2f}. "
+                            f"Skipping new buys until UTC day rolls over."
+                        )
+        except Exception as e:
+            logger.warning(f"pre-trade guard fetch failed (proceeding): {e}")
+
+        if position_count is not None and position_count >= self.max_active_positions:
+            logger.info(
+                f"SKIP new buys: {position_count} active positions >= cap "
+                f"{self.max_active_positions}. Exits still run."
+            )
+            # Fall through to exit checks but do not enter buy loop.
+            self._check_loss_alerts()
+            self._check_position_exits()
+            return
+        if circuit_broken:
+            self._check_loss_alerts()
+            self._check_position_exits()
+            return
 
         # Execute top N per cycle (default 1 — be selective, pick only the best)
         max_per_cycle = int(self.config.get("max_trades_per_cycle", 1))
