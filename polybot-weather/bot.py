@@ -384,24 +384,44 @@ def estimate_range_probability(
 # ---------------------------------------------------------------------------
 # Simmer API
 # ---------------------------------------------------------------------------
-def fetch_markets(api_key: str, limit: int = 100) -> list[dict]:
-    """Fetch weather markets from Simmer.
+def fetch_markets(api_key: str, limit: int = 100, max_total: int = 3000) -> list[dict]:
+    """Fetch weather markets from Simmer with pagination.
 
-    The default /markets endpoint returns mostly crypto noise. We use the q=temperature
-    query to filter server-side for weather markets only.
+    q=temperature filters server-side for weather markets only. Paginates by
+    offset until a batch smaller than the page size arrives (end of results)
+    or max_total reached. The previous implementation capped at 100 markets
+    per cycle — with Polymarket hosting 300+ weather markets across cities
+    and dates, that left edges on the table that the bot never saw.
+
+    Rate limit is 180/min for /markets; one paginated scan per 60s cycle is
+    well within budget even for 10+ pages.
     """
-    try:
-        resp = SESSION.get(
-            f"{SIMMER_API}/markets",
-            params={"limit": limit, "q": "temperature"},
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
-        return resp.json().get("markets", [])
-    except Exception as e:
-        logger.error(f"fetch_markets failed: {e}")
-        return []
+    all_markets: list[dict] = []
+    offset = 0
+    page_size = max(1, min(limit, 500))  # Simmer accepts up to 1000 but keep batches sane
+    for _ in range(20):  # hard safety cap, 20 * 500 = 10000 markets absolute max
+        if len(all_markets) >= max_total:
+            break
+        try:
+            resp = SESSION.get(
+                f"{SIMMER_API}/markets",
+                params={"limit": page_size, "offset": offset, "q": "temperature"},
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=REQUEST_TIMEOUT,
+            )
+            resp.raise_for_status()
+            batch = resp.json().get("markets", []) or []
+        except Exception as e:
+            logger.error(f"fetch_markets failed (offset={offset}): {e}")
+            break
+        if not batch:
+            break
+        all_markets.extend(batch)
+        if len(batch) < page_size:
+            # Last page — smaller batch means no more results server-side.
+            break
+        offset += len(batch)
+    return all_markets[:max_total]
 
 
 def fetch_balance(api_key: str, venue: str = "sim", wallet_address: str = "") -> float:
@@ -912,7 +932,11 @@ class WeatherBot:
             return
         self._low_balance_count = 0
 
-        markets = fetch_markets(self.api_key, limit=100)
+        # Page size 500 per request, 3000 total cap. Keeps us under 180/min
+        # rate limit on /markets while ensuring every weather market on
+        # Polymarket gets evaluated each cycle. Previously capped at 100
+        # which missed edges on less-popular cities/dates.
+        markets = fetch_markets(self.api_key, limit=500, max_total=3000)
         if not markets:
             logger.info("No markets fetched")
             return
