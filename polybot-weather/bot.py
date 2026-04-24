@@ -516,7 +516,10 @@ def place_order(
         payload["shares"] = shares
     else:
         payload["amount"] = amount
-    if price is not None:
+    # price parameter is Polymarket-specific. Simmer's SIM venue rejects it
+    # with HTTP 422: "price parameter only supported for venue='polymarket'".
+    # Only include the explicit limit price when trading Polymarket.
+    if price is not None and venue == "polymarket":
         payload["price"] = round(float(price), 2)
     try:
         resp = SESSION.post(
@@ -1379,8 +1382,11 @@ class WeatherBot:
         they unwind."""
         if not (self.stop_loss_enabled or self.take_profit_enabled or self.trailing_stop_enabled):
             return
-        if self.venue != "polymarket":
-            return
+        # Exits ALWAYS run on Polymarket positions regardless of self.venue,
+        # so that switching the bot to SIM for paper trading does not leave
+        # real-money positions unprotected. stop_loss_fired / position_peaks
+        # / exit thresholds protect money that is actually at risk, and the
+        # bot's venue only controls which venue NEW buys target.
         try:
             resp = SESSION.get(
                 f"{SIMMER_API}/positions",
@@ -1467,13 +1473,16 @@ class WeatherBot:
                 f"{trigger.upper()} [{side.upper()} {shares:.2f} shares @ {sell_price:.3f}]: "
                 f"{title[:50]} | {reason}"
             )
+            # Sell venue is always 'polymarket' because the positions we are
+            # exiting here live on Polymarket. self.venue controls where new
+            # buys go — it does not apply to closing real-money positions.
             result = place_order(
                 self.api_key,
                 mid,
                 side,
                 amount=0.0,
                 reason=reason,
-                venue=self.venue,
+                venue="polymarket",
                 dry_run=self.dry_run,
                 action="sell",
                 shares=round(shares, 4),
