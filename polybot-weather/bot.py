@@ -1308,10 +1308,27 @@ class WeatherBot:
             )
 
             if result.get("executed"):
+                # Guard against the DB/chain reconciliation race: Simmer can
+                # return success with shares_sold=0 when its DB thinks we own
+                # 0 shares while the buy that created the position is still
+                # pending reconciliation. Marking fired in that case bakes in
+                # permanent no-retry on a real position we now have no safety
+                # net for (seen on Chongqing 29°C Apr 26, 2026-04-24 05:18 —
+                # sell returned success+0shares, position then drifted to
+                # -56% with no further stop-loss attempts).
+                resp_body = result.get("response", {}) or {}
+                shares_sold = float(resp_body.get("shares_sold", 0) or 0)
+                if shares_sold <= 0:
+                    logger.warning(
+                        f"{trigger} returned success with 0 shares_sold "
+                        f"(likely DB/chain reconciliation race on {mid[:12]}...); "
+                        f"not marking fired — will retry next cycle"
+                    )
+                    continue
                 self.stop_loss_fired.add(mid)
                 send_telegram(
                     f"{tg_icon} *{tg_label}*\n{title}\n"
-                    f"Side {side.upper()} | {shares:.2f} shares @ {float(pos.get('avg_cost', 0)):.3f}\n"
+                    f"Side {side.upper()} | {shares_sold:.2f} shares @ {float(pos.get('avg_cost', 0)):.3f}\n"
                     f"Unrealized: ${pnl:+.2f} ({pct * 100:+.1f}%)\n"
                     f"Sell order placed (GTC) @ {round(sell_price, 2)}",
                     self.config,
