@@ -590,6 +590,49 @@ def evaluate_market(
         _tick("midpoint_no_liquidity")
         return None
 
+    # --- Liquidity filter ---------------------------------------------------
+    # alteregoeth-ai/weatherbot uses min_volume_24h $2000. We go lower ($500)
+    # because Polymarket weather markets are thinner than equity markets.
+    # This prevents attempting trades on markets whose books are so thin
+    # that 5-share minimums cannot fill, a chief cause of our FAK/GTC sell
+    # rejections earlier in the week.
+    min_volume = float(market.get("volume_24h") or 0)
+    MIN_VOLUME_24H = 500.0
+    if min_volume < MIN_VOLUME_24H:
+        if verbose:
+            logger.info(
+                f"  SKIP (volume ${min_volume:.0f} < ${MIN_VOLUME_24H:.0f}): {title[:70]}"
+            )
+        _tick("low_volume")
+        return None
+
+    # --- Time-to-resolution filter ------------------------------------------
+    # Skip markets resolving <2h away (thin-liquidity spikes as traders exit)
+    # and >96h away (forecast uncertainty too high even with σ wide).
+    resolves_at = market.get("resolves_at")
+    if resolves_at:
+        try:
+            # Handle both "2026-04-26 12:00:00Z" and "2026-04-26T12:00:00" forms
+            rs = str(resolves_at).replace(" ", "T").rstrip("Z")
+            res_dt = datetime.fromisoformat(rs).replace(tzinfo=timezone.utc)
+            hours_to_resolve = (res_dt - datetime.now(timezone.utc)).total_seconds() / 3600
+            if hours_to_resolve < 2.0:
+                if verbose:
+                    logger.info(
+                        f"  SKIP ({hours_to_resolve:.1f}h to resolve — too close): {title[:70]}"
+                    )
+                _tick("too_close_to_resolve")
+                return None
+            if hours_to_resolve > 96.0:
+                if verbose:
+                    logger.info(
+                        f"  SKIP ({hours_to_resolve:.1f}h to resolve — too far): {title[:70]}"
+                    )
+                _tick("too_far_to_resolve")
+                return None
+        except Exception:
+            pass  # unparseable date — allow through, downstream filters handle it
+
     parsed = parse_weather_market(title)
     if not parsed:
         if verbose:
@@ -968,6 +1011,9 @@ class WeatherBot:
             "shares_below_min": 0,
             "already_traded": 0,
             "already_failed": 0,
+            "low_volume": 0,
+            "too_close_to_resolve": 0,
+            "too_far_to_resolve": 0,
         }
         # Snapshot of total_trades at window start — used to compute trades
         # executed within the current window for the evaluated-count math.
