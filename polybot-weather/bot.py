@@ -727,6 +727,34 @@ def evaluate_market(
         _tick("entry_too_low")
         return None
 
+    # FAT TAIL TRAP GUARD (added 2026-04-24): when buying the cheap YES on a
+    # market the venue already prices at <10% likelihood, be suspicious of
+    # the model. Evidence (losses in last 48h):
+    #   Kuala Lumpur 37°C YES @ 5¢  market 6%   bot 27%  → -87% ($1.77 loss)
+    #   Panama City 32°C NO @ 27¢   market 78%  bot 37%  → losing
+    # Normal-distribution tails overstate extreme-temperature probabilities
+    # because real temp distributions have thinner tails than normal. When
+    # both sides disagree on a tail event by >2x AND the market is deeply
+    # confident (<10%), trust the market — arbitrageurs with better
+    # calibration have already acted.
+    _market_yes = current_price
+    if side == "yes" and _market_yes < 0.10 and p_yes > 2 * _market_yes:
+        if verbose:
+            logger.info(
+                f"  SKIP (fat-tail trap: YES bot {p_yes:.2f} vs market {_market_yes:.2f}): {title[:60]}"
+            )
+        _tick("fat_tail_trap")
+        return None
+    _market_no = 1 - current_price
+    _p_no = 1 - p_yes
+    if side == "no" and _market_no < 0.10 and _p_no > 2 * _market_no:
+        if verbose:
+            logger.info(
+                f"  SKIP (fat-tail trap: NO bot {_p_no:.2f} vs market {_market_no:.2f}): {title[:60]}"
+            )
+        _tick("fat_tail_trap")
+        return None
+
     # MARKET PRICE EXTREMES: skip markets at 0.99+ or 0.01- on the OPPOSITE side
     # If market_price (YES) is 1.00, market thinks YES is certain. Even if our
     # forecast disagrees, this is usually a sign the market is already settling.
@@ -904,6 +932,7 @@ class WeatherBot:
             "no_temp": 0,
             "edge_too_small": 0,
             "entry_too_high": 0,
+            "fat_tail_trap": 0,
             "entry_too_low": 0,
             "market_extreme": 0,
             "no_yes_on_exact": 0,
