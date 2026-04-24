@@ -718,12 +718,22 @@ def evaluate_market(
         _tick("entry_too_high")
         return None
 
-    # MIN entry price: reject trades where the side we're buying is too cheap (<5¢)
-    # This usually means the market is already resolved/about to resolve, or the
-    # other side is at >0.95 which means YES/NO is locked in.
-    if entry_price < 0.05:
+    # MIN entry price: reject trades where the side we're buying is too cheap (<20¢).
+    # Raised from 0.05 to 0.20 on 2026-04-24 after calibration-log analysis:
+    #
+    #   Entry <0.20 (tail bets):   N=6   WR  0%  P&L -$37.47  ← systematic loss
+    #   Entry 0.20-0.55 (mid):     N=19  WR 95%  P&L +$141.86 ← golden zone
+    #   Entry 0.55-0.85 (high):    N=8   WR 75%  P&L  +$4.48  ← marginal
+    #
+    # Cheap tail bets (<20¢) were 0/6 winners. The fat-tail trap guard
+    # already catches some of these, but many slip through because they're
+    # not extreme enough to trigger the 2×market-implied rule. A flat 20¢
+    # floor is simpler and closes the systematic-loss bucket entirely.
+    # Cost: we lose legitimate tail plays like Seattle 57°F YES @ 11¢ (+809%),
+    # but that was N=1 against 6 losers — expected value is negative.
+    if entry_price < 0.20:
         if verbose:
-            logger.info(f"  SKIP (entry {entry_price:.2f} < 0.05, market likely resolving): {title[:60]}")
+            logger.info(f"  SKIP (entry {entry_price:.2f} < 0.20, tail-bet zone with 0% historical WR): {title[:60]}")
         _tick("entry_too_low")
         return None
 
