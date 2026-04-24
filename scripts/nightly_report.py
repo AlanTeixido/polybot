@@ -20,7 +20,7 @@ import requests
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 WEATHER_LOG = os.path.join(ROOT, "memory", "calibration_log.jsonl")
-CRYPTO_LOG = os.path.join(ROOT, "memory", "crypto_calibration_log.jsonl")
+# CRYPTO_LOG removed 2026-04-24 with the polybot-crypto deletion.
 WEATHER_CONFIG = os.path.join(ROOT, "polybot-weather", "config.json")
 LOCK_FILE = "/tmp/polybot_nightly_report.lock"
 SIMMER_API = "https://api.simmer.markets/api/sdk"
@@ -409,22 +409,22 @@ def section_for_bot(
     }
 
 
-def go_no_go(weather_72: dict, crypto_72: dict) -> str:
-    """Apply criteria. Returns formatted decision block."""
+def go_no_go(weather_72: dict) -> str:
+    """Apply criteria. Returns formatted decision block.
+
+    Crypto criteria removed 2026-04-24 along with the polybot-crypto
+    directory — Solana momentum SIM bot was losing systematically
+    (-$2059 SIM cumulative, WR 21-28%, drift 33%) and its data was
+    polluting the macro-bot go/no-go. Kept weather criteria only.
+    """
     checks = []
     weather_ok_pnl = (not _isnan(weather_72["pnl"])) and weather_72["pnl"] >= 0
     weather_ok_n = weather_72["n_resolved"] >= 8
-    crypto_ok_wr = (not _isnan(crypto_72["wr"])) and crypto_72["wr"] >= 0.40
-    crypto_ok_n = crypto_72["n_resolved"] >= 10
     drift_ok_w = _isnan(weather_72["drift"]) or weather_72["drift"] < 0.15
-    drift_ok_c = _isnan(crypto_72["drift"]) or crypto_72["drift"] < 0.15
 
     checks.append(("Weather P&L ≥ 0", weather_ok_pnl))
     checks.append(("Weather N ≥ 8", weather_ok_n))
-    checks.append(("Crypto WR ≥ 40%", crypto_ok_wr))
-    checks.append(("Crypto N ≥ 10", crypto_ok_n))
     checks.append(("Weather drift < 15%", drift_ok_w))
-    checks.append(("Crypto drift < 15%", drift_ok_c))
 
     all_ok = all(ok for _, ok in checks)
     out = ["\n🎯 DECISIÓN MACRO BOT:"]
@@ -487,8 +487,8 @@ def main() -> None:
             f"📊 Polybot Status — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
         ]
 
-        # Per-window sections.
-        # Filter by source to exclude legacy agent.py trades from shared log.
+        # Per-window sections. Weather only now — crypto bot removed
+        # 2026-04-24 after sustained poor performance in SIM.
         decision_data = {}
         for label, secs in windows:
             report_lines.append(f"\n━━━━━ Ventana {label} ━━━━━")
@@ -496,19 +496,13 @@ def main() -> None:
                 "WEATHER (Polymarket)", WEATHER_LOG, "comparison", "$", api_key, secs,
                 source_filter="weather-bot",
             )
-            c_section, c_summary = section_for_bot(
-                "CRYPTO (SIM)", CRYPTO_LOG, "asset", "S", api_key, secs,
-                source_filter="crypto-bot",
-            )
             report_lines.append(w_section)
-            report_lines.append(c_section)
             if label == "72h":
                 decision_data["weather"] = w_summary
-                decision_data["crypto"] = c_summary
 
         # Go/no-go (always uses 72h window)
         if decision_data:
-            report_lines.append(go_no_go(decision_data["weather"], decision_data["crypto"]))
+            report_lines.append(go_no_go(decision_data["weather"]))
 
         msg = "\n".join(report_lines)
         send_telegram(msg, config)

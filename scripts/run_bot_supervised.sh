@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Auto-restart supervisor for polybot bots.
+# Auto-restart supervisor for the weather bot.
 #
 # Usage:
-#   ./scripts/run_bot_supervised.sh weather   # runs polybot-weather/bot.py
-#   ./scripts/run_bot_supervised.sh crypto    # runs polybot-crypto/bot.py
+#   ./scripts/run_bot_supervised.sh weather
 #
 # Restarts the bot process if it crashes. Backs off after consecutive crashes
 # to avoid tight loops (5s, 30s, 5min, 5min, ...). Logs supervisor events to
@@ -17,9 +16,8 @@ set -u
 BOT="${1:-}"
 case "$BOT" in
   weather) BOT_DIR="$HOME/polybot/polybot-weather" ;;
-  crypto)  BOT_DIR="$HOME/polybot/polybot-crypto" ;;
   *)
-    echo "Usage: $0 {weather|crypto}" >&2
+    echo "Usage: $0 weather" >&2
     exit 2
     ;;
 esac

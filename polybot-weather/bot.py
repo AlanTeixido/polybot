@@ -31,8 +31,7 @@ CONFIG_PATH = os.path.join(HERE, "config.json")
 LOG_PATH = os.path.join(HERE, "weather-bot.log")
 STATE_PATH = os.path.join(HERE, "state.json")
 
-# Project root on sys.path so we can reuse shared helpers from tools/
-# (same pattern as polybot-crypto/bot.py).
+# Project root on sys.path so we can reuse shared helpers from tools/.
 ROOT = os.path.dirname(HERE)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
