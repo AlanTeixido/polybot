@@ -1400,12 +1400,24 @@ class WeatherBot:
 
             # Legitimate rejection: give up on this market.
             self.stop_loss_fired.add(mid)
+            # Persist immediately — without this, a crash before the end-of-cycle
+            # save_state() would lose the entry and the next cycle would re-fire
+            # the stop-loss + Telegram alert. Was happening 2x per phantom market.
+            self.state["stop_loss_fired"] = list(self.stop_loss_fired)
+            save_state(self.state)
             logger.warning(f"{trigger} sell rejected (giving up): {err[:200]}")
-            send_telegram(
-                f"⚠️ *{reject_label}*\n{title}\n"
-                f"{pct * 100:+.1f}% | {err[:150]}",
-                self.config,
-            )
+
+            # Suppress Telegram for non-actionable phantom-share rejections.
+            # When Polymarket reports 0 shares but our state thought we had N,
+            # the position was already redeemed/transferred outside the bot.
+            # Nothing the user can do about it — just spam.
+            is_phantom = "insufficient shares" in err_lower
+            if not is_phantom:
+                send_telegram(
+                    f"⚠️ *{reject_label}*\n{title}\n"
+                    f"{pct * 100:+.1f}% | {err[:150]}",
+                    self.config,
+                )
 
         self.state["stop_loss_fired"] = list(self.stop_loss_fired)
         # Keep the peak map bounded to markets we still track — drop entries
