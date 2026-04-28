@@ -1049,6 +1049,14 @@ class WeatherBot:
         # Increment cycle counter
         self._cycle_num = getattr(self, "_cycle_num", 0) + 1
 
+        # Run exits FIRST every cycle. Previously exits only ran inside the
+        # buy-evaluation branch, so cycles with no buy opportunities (the
+        # majority — observed: 6+ consecutive cycles with "No opportunities"
+        # after switching to SIM, 14 SIM positions sitting in stop-loss zone
+        # with no exit attempt) silently skipped exits entirely. Running
+        # exits at the top of every cycle decouples protection from buy flow.
+        self._check_position_exits()
+
         # Clean stale traded_markets: remove IDs not in current market list
         # This prevents the state file from growing forever
         if self._cycle_num % 50 == 0:  # every ~50 cycles
@@ -1159,15 +1167,12 @@ class WeatherBot:
         if position_count is not None and position_count >= self.max_active_positions:
             logger.info(
                 f"SKIP new buys: {position_count} active positions >= cap "
-                f"{self.max_active_positions}. Exits still run."
+                f"{self.max_active_positions}. Exits already ran this cycle."
             )
-            # Fall through to exit checks but do not enter buy loop.
             self._check_loss_alerts()
-            self._check_position_exits()
             return
         if circuit_broken:
             self._check_loss_alerts()
-            self._check_position_exits()
             return
 
         # Execute top N per cycle (default 1 — be selective, pick only the best)
@@ -1306,10 +1311,8 @@ class WeatherBot:
                     )
 
         # Check for loss-threshold crossings on open positions (one-shot alerts).
+        # Exits already ran at the top of the cycle.
         self._check_loss_alerts()
-
-        # Bot-side exits: stop-loss (pain threshold) and take-profit (gain lock).
-        self._check_position_exits()
 
     def _check_loss_alerts(self) -> None:
         """Send a one-time Telegram alert when any open position crosses
