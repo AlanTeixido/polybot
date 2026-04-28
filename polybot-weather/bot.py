@@ -746,10 +746,13 @@ def evaluate_market(
     # like Miami 78-79°F NO (entry 0.68, +$29) and Toronto 17°C NO
     # (entry 0.74, +$15). Both had edges >>30% — the bigger edge is the
     # right way to justify paying more per share.
-    # SIM ignores the tiering since the bot is already conservative there.
-    if venue_hint != "polymarket":
-        max_entry = 0.75
-    elif abs_edge >= 0.50:
+    # 2026-04-25: tiered cap applied to ALL venues. Earlier override that let
+    # SIM accept up to 0.75 unconditionally produced a -$198 / -9.3% bucket of
+    # 12 active positions in the 0.65-0.75 zone (mostly range markets bought
+    # NO at 0.7) — exactly the marginal zone the tier was designed to filter.
+    # In polymarket the tier is associated with ROI +14% / 87 trades; the
+    # mismatch was the only structural difference between venues.
+    if abs_edge >= 0.50:
         max_entry = 0.75
     elif abs_edge >= 0.35:
         max_entry = 0.65
@@ -1211,9 +1214,7 @@ class WeatherBot:
             # approved at edge 0.50 with entry 0.70 does not get clamped back
             # to 0.55 and left unfilled.
             _abs_edge = abs(opp.get("edge", 0))
-            if self.venue != "polymarket":
-                _max_entry = 0.75
-            elif _abs_edge >= 0.50:
+            if _abs_edge >= 0.50:
                 _max_entry = 0.75
             elif _abs_edge >= 0.35:
                 _max_entry = 0.65
@@ -1384,21 +1385,30 @@ class WeatherBot:
             return
         # Exits ALWAYS run on Polymarket positions regardless of self.venue,
         # so that switching the bot to SIM for paper trading does not leave
-        # real-money positions unprotected. stop_loss_fired / position_peaks
-        # / exit thresholds protect money that is actually at risk, and the
-        # bot's venue only controls which venue NEW buys target.
-        try:
-            resp = SESSION.get(
-                f"{SIMMER_API}/positions",
-                params={"venue": "polymarket", "status": "active"},
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                timeout=REQUEST_TIMEOUT,
-            )
-            resp.raise_for_status()
-            positions = resp.json().get("positions", [])
-        except Exception as e:
-            logger.warning(f"position_exits fetch_positions failed: {e}")
-            return
+        # real-money positions unprotected. Additionally, when the bot is
+        # actively trading SIM, exits also run on SIM positions — without
+        # this the SIM book accumulates losers indefinitely (observed:
+        # 18/20 active SIM positions losing for -$198 unrealized, none
+        # protected, 2026-04-25). self.venue controls where new buys go;
+        # exits cover all venues where the bot has skin in the game.
+        venues_to_protect = ["polymarket"]
+        if self.venue == "sim":
+            venues_to_protect.append("sim")
+        positions = []
+        for v in venues_to_protect:
+            try:
+                resp = SESSION.get(
+                    f"{SIMMER_API}/positions",
+                    params={"venue": v, "status": "active"},
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    timeout=REQUEST_TIMEOUT,
+                )
+                resp.raise_for_status()
+                for pos in resp.json().get("positions", []):
+                    pos["_venue"] = v
+                    positions.append(pos)
+            except Exception as e:
+                logger.warning(f"position_exits fetch_positions {v} failed: {e}")
 
         for pos in positions:
             mid = str(pos.get("market_id", ""))
@@ -1473,16 +1483,18 @@ class WeatherBot:
                 f"{trigger.upper()} [{side.upper()} {shares:.2f} shares @ {sell_price:.3f}]: "
                 f"{title[:50]} | {reason}"
             )
-            # Sell venue is always 'polymarket' because the positions we are
-            # exiting here live on Polymarket. self.venue controls where new
-            # buys go — it does not apply to closing real-money positions.
+            # Sell venue mirrors the venue of the position being exited —
+            # not self.venue. A SIM position must close on SIM, a Polymarket
+            # position must close on Polymarket, regardless of where new buys
+            # are currently being routed.
+            pos_venue = str(pos.get("_venue") or "polymarket")
             result = place_order(
                 self.api_key,
                 mid,
                 side,
                 amount=0.0,
                 reason=reason,
-                venue="polymarket",
+                venue=pos_venue,
                 dry_run=self.dry_run,
                 action="sell",
                 shares=round(shares, 4),
