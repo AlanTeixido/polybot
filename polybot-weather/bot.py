@@ -594,13 +594,14 @@ def evaluate_market(
         return None
 
     # --- Liquidity filter ---------------------------------------------------
-    # alteregoeth-ai/weatherbot uses min_volume_24h $2000. We go lower ($500)
-    # because Polymarket weather markets are thinner than equity markets.
-    # This prevents attempting trades on markets whose books are so thin
-    # that 5-share minimums cannot fill, a chief cause of our FAK/GTC sell
-    # rejections earlier in the week.
+    # alteregoeth-ai/weatherbot uses min_volume_24h $2000. Raised from $500
+    # to $1000 on 2026-04-25 after observing several SL fires return
+    # "Insufficient shares" on thin markets — even after the buy, the
+    # other side of the book evaporates by the time we want to exit. $1000
+    # is still below alteregoeth's threshold but above the level where
+    # weather markets routinely fail sell orders.
     min_volume = float(market.get("volume_24h") or 0)
-    MIN_VOLUME_24H = 500.0
+    MIN_VOLUME_24H = 1000.0
     if min_volume < MIN_VOLUME_24H:
         if verbose:
             logger.info(
@@ -890,7 +891,13 @@ def compute_bet_size(
         return 0
 
     p_win = p_real if edge > 0 else (1 - p_real)  # our prob that our side wins
-    payout_odds = (1 - entry_price) / entry_price  # net profit per $1 risked
+    # Net payout per $1 risked: gross win is (1 - entry_price) but Simmer
+    # takes 10% fee on the profit, so we keep 90%. Including fee in Kelly
+    # was missing pre-2026-04-25 — the bot was sizing as if fee were 0,
+    # systematically over-betting. After-fee odds are ~10% smaller, so
+    # Kelly fraction shrinks proportionally — apretando, no relajando.
+    fee_rate = float(config.get("fee_rate", 0.10))
+    payout_odds = (1 - entry_price) * (1 - fee_rate) / entry_price
 
     if payout_odds <= 0:
         return 0
@@ -899,12 +906,16 @@ def compute_bet_size(
     q_lose = 1 - p_win
     kelly_fraction = (p_win * payout_odds - q_lose) / payout_odds
 
-    # If Kelly says don't bet (negative edge), skip
+    # If Kelly says don't bet (negative edge after fee), skip
     if kelly_fraction <= 0:
         return 0
 
-    # Use HALF Kelly to reduce variance (standard practice)
-    half_kelly = kelly_fraction / 2
+    # Use HALF Kelly to reduce variance (standard practice). Configurable
+    # via kelly_fraction in config (default 0.5). Lower values (0.25) give
+    # smoother equity curve at cost of growth rate; only lower after we
+    # have deduplicated stats showing avg_loss is in fact 2x avg_win.
+    kelly_mult = float(config.get("kelly_fraction", 0.5))
+    half_kelly = kelly_fraction * kelly_mult
 
     # Apply bankroll constraints
     base = min(max_bet, balance * max_pct)
@@ -1105,9 +1116,13 @@ class WeatherBot:
                     _ck = f"{_parsed['city']}|{_tdate}"
                     _city_date_counts[_ck] = _city_date_counts.get(_ck, 0) + 1
 
-        # Evaluate each
+        # Evaluate each. max_correlated lowered 3→2 on 2026-04-25:
+        # observed SIM losers cluster in same (city, date) — multiple
+        # Atlanta/LA/Seattle range trades all losing together when
+        # the local forecast misses (single point of failure for
+        # multiple shares of bankroll). Cap at 2 keeps diversification.
         opportunities = []
-        max_correlated = 3
+        max_correlated = 2
         failed_set = set(self.state.get("failed_markets", []))
         for m in weather_markets:
             if m.get("id") in self.state.get("traded_markets", []):
