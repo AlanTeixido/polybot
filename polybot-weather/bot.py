@@ -652,6 +652,17 @@ def evaluate_market(
         _tick("equal_paused")
         return None
 
+    # PAUSED 2026-04-25: range markets ("between X-Y°F") had ROI -1.6% on
+    # N=2075 resolved trades vs +9.4% on threshold markets and +6.8% on
+    # exact. The 1°F window is too narrow for the normal-distribution σ
+    # to capture; effective_min_edge=0.25 was not enough on its own.
+    # Threshold and exact markets keep running.
+    if parsed["comparison"] == "range":
+        if verbose:
+            logger.info(f"  SKIP (range markets paused — ROI -1.6%/N=2075): {title[:70]}")
+        _tick("range_paused")
+        return None
+
     target_date = parse_target_date(title)
     if not target_date:
         if verbose:
@@ -1000,6 +1011,7 @@ class WeatherBot:
         # into why markets are filtered without needing verbose logging.
         self._skip_counts: dict[str, int] = {
             "equal_paused": 0,
+            "range_paused": 0,
             "parse_failed": 0,
             "no_date": 0,
             "no_forecast": 0,
