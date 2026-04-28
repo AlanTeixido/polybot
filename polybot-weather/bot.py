@@ -1094,6 +1094,42 @@ class WeatherBot:
                 logger.info(f"Cleaned {cleaned} stale entries from traded_markets")
                 save_state(self.state)
 
+        # Heal "fired-but-alive" positions every 100 cycles (~100 min).
+        # When a stop-loss sell rejects with "Insufficient shares" but the
+        # position remains active in /positions (Simmer DB/chain race or
+        # phantom share state), the bot adds the market_id to stop_loss_fired
+        # and stops retrying. Observed in production: Opensea $100M YES
+        # marked fired then continued to drift to -40% with no further
+        # exit attempt. Cleanup retries by removing fired entries whose
+        # positions are still active — exits will re-attempt on the next
+        # cycle, and most race conditions resolve within the 100-cycle
+        # window. Also caps failed_markets to most recent 200 (FIFO).
+        if self._cycle_num % 100 == 0:
+            try:
+                resp = SESSION.get(
+                    f"{SIMMER_API}/positions",
+                    params={"venue": self.venue, "status": "active", "limit": 500},
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    timeout=REQUEST_TIMEOUT,
+                )
+                if resp.ok:
+                    active_pos_ids = {str(p.get("market_id","")) for p in resp.json().get("positions",[])}
+                    # Remove still-active positions from fired set so exits retry
+                    healed = self.stop_loss_fired & active_pos_ids
+                    if healed:
+                        self.stop_loss_fired -= healed
+                        self.state["stop_loss_fired"] = list(self.stop_loss_fired)
+                        logger.info(f"Healed {len(healed)} fired-but-alive positions: will retry SL/TP/trail")
+                        save_state(self.state)
+            except Exception as e:
+                logger.warning(f"fired-set heal skipped: {e}")
+            # Cap failed_markets to most recent 200
+            fm = self.state.get("failed_markets", [])
+            if len(fm) > 200:
+                self.state["failed_markets"] = fm[-200:]
+                save_state(self.state)
+                logger.info(f"Trimmed failed_markets {len(fm)}→200")
+
         # Filter to weather markets
         weather_markets = [m for m in markets if any(kw in (m.get("question", "") or "").lower() for kw in ["temperature", "°c", "°f"])]
 
