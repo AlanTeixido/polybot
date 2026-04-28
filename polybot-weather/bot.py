@@ -1399,14 +1399,16 @@ class WeatherBot:
             try:
                 resp = SESSION.get(
                     f"{SIMMER_API}/positions",
-                    params={"venue": v, "status": "active"},
+                    params={"venue": v, "status": "active", "limit": 500},
                     headers={"Authorization": f"Bearer {self.api_key}"},
                     timeout=REQUEST_TIMEOUT,
                 )
                 resp.raise_for_status()
-                for pos in resp.json().get("positions", []):
+                v_positions = resp.json().get("positions", [])
+                for pos in v_positions:
                     pos["_venue"] = v
                     positions.append(pos)
+                logger.info(f"position_exits: fetched {len(v_positions)} {v} positions")
             except Exception as e:
                 logger.warning(f"position_exits fetch_positions {v} failed: {e}")
 
