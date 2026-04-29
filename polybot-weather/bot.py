@@ -606,7 +606,7 @@ def evaluate_market(
     # markets where it has positive ROI without re-introducing the thin-book
     # exit failures.
     min_volume = float(market.get("volume_24h") or 0)
-    MIN_VOLUME_24H = 500.0
+    MIN_VOLUME_24H = 0.0  # post-V2-migration; restore to 500 after volumes normalize (~48h post 2026-04-28)
     if min_volume < MIN_VOLUME_24H:
         if verbose:
             logger.info(
