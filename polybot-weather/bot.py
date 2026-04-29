@@ -594,14 +594,19 @@ def evaluate_market(
         return None
 
     # --- Liquidity filter ---------------------------------------------------
-    # Empirical history: $500 (too thin, sells fail Insufficient shares),
-    # $1000 (too restrictive: 1677/3000 cycles bottlenecked here in the
-    # 2026-04-29 audit, 0 trades in 24h). $750 is the compromise — filters
-    # the thinnest markets where the book disappears between buy and sell,
-    # but lets through enough volume for the bot to actually find trades.
-    # Re-tune if either 0 trades/24h returns or sell rejections increase.
+    # Empirical history:
+    #   $500  → original, polymarket weather N=87 ROI +14.2%
+    #   $1000 → too restrictive, 1677/3000 cycles bottlenecked, 0 trades/24h
+    #   $750  → still too restrictive, 1198/1500 bottlenecked, 0 trades/25h
+    # Reverting to $500. The "Insufficient shares" sell failures that
+    # motivated tightening were concentrated in range markets — those are
+    # now paused via range_paused, removing the worst offenders. Phantom
+    # share rejections are also handled by the fired-but-alive heal cycle
+    # (every 100 cycles). $500 lets the bot actually find the threshold
+    # markets where it has positive ROI without re-introducing the thin-book
+    # exit failures.
     min_volume = float(market.get("volume_24h") or 0)
-    MIN_VOLUME_24H = 750.0
+    MIN_VOLUME_24H = 500.0
     if min_volume < MIN_VOLUME_24H:
         if verbose:
             logger.info(
