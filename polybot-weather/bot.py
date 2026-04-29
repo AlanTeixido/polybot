@@ -737,6 +737,16 @@ def evaluate_market(
         _tick("edge_too_small")
         return None
 
+    # MAX edge cap — added 2026-04-29 after post-mortem on N=40 resolved SIM
+    # trades showed edge>0.50 had WR 0/3 with -$600 P&L. Massive edges are
+    # almost always false signals (model overconfident at extremes, market
+    # has info we don't, or thin-liquidity midpoint noise). Skip them.
+    if abs_edge > 0.50:
+        if verbose:
+            logger.info(f"  SKIP (edge {abs_edge:.2f} > 0.50, false-signal zone): {title[:60]}")
+        _tick("edge_too_big")
+        return None
+
     side = "yes" if edge > 0 else "no"
 
     # RULE: Never buy YES on exact-temp markets — probability is inherently low
@@ -1035,6 +1045,7 @@ class WeatherBot:
             "edge_too_small": 0,
             "entry_too_high": 0,
             "fat_tail_trap": 0,
+            "edge_too_big": 0,
             "entry_too_low": 0,
             "market_extreme": 0,
             "no_yes_on_exact": 0,
