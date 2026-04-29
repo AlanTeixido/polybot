@@ -594,14 +594,14 @@ def evaluate_market(
         return None
 
     # --- Liquidity filter ---------------------------------------------------
-    # alteregoeth-ai/weatherbot uses min_volume_24h $2000. Raised from $500
-    # to $1000 on 2026-04-25 after observing several SL fires return
-    # "Insufficient shares" on thin markets — even after the buy, the
-    # other side of the book evaporates by the time we want to exit. $1000
-    # is still below alteregoeth's threshold but above the level where
-    # weather markets routinely fail sell orders.
+    # Empirical history: $500 (too thin, sells fail Insufficient shares),
+    # $1000 (too restrictive: 1677/3000 cycles bottlenecked here in the
+    # 2026-04-29 audit, 0 trades in 24h). $750 is the compromise — filters
+    # the thinnest markets where the book disappears between buy and sell,
+    # but lets through enough volume for the bot to actually find trades.
+    # Re-tune if either 0 trades/24h returns or sell rejections increase.
     min_volume = float(market.get("volume_24h") or 0)
-    MIN_VOLUME_24H = 1000.0
+    MIN_VOLUME_24H = 750.0
     if min_volume < MIN_VOLUME_24H:
         if verbose:
             logger.info(
