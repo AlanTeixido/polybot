@@ -936,6 +936,20 @@ def compute_bet_size(
     base = min(max_bet, balance * max_pct)
     bet = base * min(1.0, half_kelly / 0.05)  # normalize: 5% half-kelly = full base bet
 
+    # HIGH-CONVICTION SCALING (added 2026-04-30)
+    # Post-mortem on N=40 resolved SIM trades shows per-trade EV is HIGHER
+    # in the 0.30-0.50 edge bucket than the 0.20-0.30 bucket:
+    #   edge 0.20-0.30: 73% WR, +$62/trade avg
+    #   edge 0.30-0.40: 67% WR, +$87/trade avg  ← scale up
+    #   edge 0.40-0.50: 50% WR, +$94/trade avg  ← scale up
+    #   edge >0.50:     0% WR (BLOCKED upstream as fat-tail trap)
+    # Multiplier 1.4x in the 0.30-0.50 zone increases compounding without
+    # exceeding max_bet cap (it's still bounded by base = min(max_bet, ...)).
+    if 0.30 <= abs_edge < 0.50:
+        bet = bet * 1.4
+        bet = min(bet, max_bet)  # respect absolute cap
+
+
     if venue == "polymarket":
         # Simmer charges 10% fee BEFORE calculating shares, and price slips on impact.
         # Target 6 shares (1 buffer above 5 minimum) with fee compensation.
