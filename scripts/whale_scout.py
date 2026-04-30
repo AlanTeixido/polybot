@@ -138,18 +138,96 @@ def consistency_report() -> None:
         print(f"  [{cat:<10}] {wallet[:8]}... appeared {n}d | last pnl_week: ${pnl:.0f}")
 
 
+def fetch_alltime_legends(category: str) -> list[dict]:
+    """All-time top by PNL — these are the proven track-record traders.
+    Different filters: profit-focused, not ROI-focused. A whale with $50M
+    volume and $5M profit is a legend even if ROI is "only" 10%.
+    """
+    rows = fetch_leaderboard(category, time_period="ALL", limit=50)
+    out = []
+    for row in rows:
+        try:
+            wallet = (row.get("proxyWallet") or row.get("wallet") or "").lower()
+            name = row.get("userName") or row.get("name") or ""
+            vol = float(row.get("vol") or row.get("volume") or 0)
+            pnl = float(row.get("pnl") or 0)
+            verified = bool(row.get("verifiedBadge"))
+
+            if not wallet or len(wallet) != 42:
+                continue
+            # All-time legend = absolute profit threshold
+            if pnl < 50_000:        # at least $50k all-time profit
+                continue
+            if vol < 100_000:       # real participation
+                continue
+
+            out.append({
+                "wallet": wallet,
+                "name": name,
+                "vol_alltime": round(vol, 2),
+                "pnl_alltime": round(pnl, 2),
+                "roi_pct_alltime": round((pnl / vol * 100) if vol > 0 else 0, 2),
+                "verified": verified,
+                "category": category,
+                "tier": "alltime_legend",
+            })
+        except Exception:
+            continue
+    out.sort(key=lambda w: w["pnl_alltime"], reverse=True)
+    return out
+
+
+def merge_weekly_and_alltime(weekly: list[dict], alltime: list[dict]) -> list[dict]:
+    """Combine the two lists, dedup by wallet. Mark each whale's tiers.
+    A wallet appearing in BOTH is the strongest signal — proven long-term
+    AND currently active.
+    """
+    by_wallet: dict[str, dict] = {}
+    for w in weekly:
+        by_wallet[w["wallet"]] = {**w, "tier": "weekly_hot"}
+    for w in alltime:
+        if w["wallet"] in by_wallet:
+            # Merge — both tiers
+            by_wallet[w["wallet"]]["tier"] = "both_alltime+weekly"
+            by_wallet[w["wallet"]]["pnl_alltime"] = w["pnl_alltime"]
+            by_wallet[w["wallet"]]["vol_alltime"] = w["vol_alltime"]
+            by_wallet[w["wallet"]]["roi_pct_alltime"] = w["roi_pct_alltime"]
+        else:
+            by_wallet[w["wallet"]] = w
+    # Order: both > alltime > weekly
+    rank = {"both_alltime+weekly": 0, "alltime_legend": 1, "weekly_hot": 2}
+    return sorted(by_wallet.values(), key=lambda w: (rank.get(w["tier"], 9),
+                                                     -w.get("pnl_alltime", w.get("pnl_week", 0))))
+
+
 def main() -> None:
     print(f"=== Whale scout @ {datetime.now(timezone.utc).isoformat()} ===")
     for cat in TARGET_CATEGORIES:
-        rows = fetch_leaderboard(cat)
-        whales = filter_whales(rows, cat)
-        persist(cat, whales)
-        append_history(cat, whales)
-        # show top 5 inline
-        for w in whales[:5]:
-            print(f"  [{cat}] {w['wallet'][:8]}... {w['name']:<24} "
-                  f"vol=${w['vol_week']:>10.0f}  pnl=${w['pnl_week']:>+8.0f}  "
-                  f"roi={w['roi_pct_week']:>5.2f}%")
+        # 1) Weekly active winners
+        rows_week = fetch_leaderboard(cat, time_period="WEEK", limit=50)
+        weekly = filter_whales(rows_week, cat)
+
+        # 2) All-time legends by total profit
+        alltime = fetch_alltime_legends(cat)
+
+        # 3) Merge: combined whale roster with tier annotation
+        combined = merge_weekly_and_alltime(weekly, alltime)
+
+        persist(cat, combined)
+        append_history(cat, weekly)  # history tracks weekly snapshots only
+
+        # Show top 5 with tier
+        print(f"\n[{cat}] {len(combined)} total whales "
+              f"({len(weekly)} weekly + {len(alltime)} alltime, "
+              f"{sum(1 for w in combined if w['tier'] == 'both_alltime+weekly')} in both):")
+        for w in combined[:8]:
+            tier = w["tier"][:18]
+            name = (w.get("name") or "?")[:20]
+            pnl_a = w.get("pnl_alltime", 0)
+            pnl_w = w.get("pnl_week", 0)
+            print(f"  [{tier:<18}] {w['wallet'][:8]}... {name:<22} "
+                  f"alltime=${pnl_a:>+10.0f}  week=${pnl_w:>+8.0f}")
+
     consistency_report()
 
 
