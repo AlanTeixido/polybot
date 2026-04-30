@@ -1,0 +1,6 @@
+{
+  "simmer_api_key": "YOUR_SIMMER_KEY_HERE",
+  "bet_size": 10,
+  "max_copies_per_cycle": 3,
+  "cycle_interval_seconds": 60
+}

@@ -1,23 +1,22 @@
 #!/usr/bin/env bash
-# Auto-restart supervisor for the weather bot.
+# Auto-restart supervisor for any polybot.
 #
 # Usage:
 #   ./scripts/run_bot_supervised.sh weather
+#   ./scripts/run_bot_supervised.sh sports
 #
 # Restarts the bot process if it crashes. Backs off after consecutive crashes
 # to avoid tight loops (5s, 30s, 5min, 5min, ...). Logs supervisor events to
 # ~/polybot/supervisor.log.
-#
-# Run inside screen:
-#   screen -dmS weather-bot bash -c '~/polybot/scripts/run_bot_supervised.sh weather 2>&1 | tee -a ~/polybot/weather.log'
 
 set -u
 
 BOT="${1:-}"
 case "$BOT" in
   weather) BOT_DIR="$HOME/polybot/polybot-weather" ;;
+  sports)  BOT_DIR="$HOME/polybot/polybot-sports"  ;;
   *)
-    echo "Usage: $0 weather" >&2
+    echo "Usage: $0 {weather|sports}" >&2
     exit 2
     ;;
 esac
