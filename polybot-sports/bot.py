@@ -267,6 +267,43 @@ def cycle(config: dict, state: dict) -> None:
             if price < 0.05 or price > 0.95:
                 continue
 
+            # Filter: skip 5-min crypto Up/Down "noise" markets entered near 0.50.
+            # Data from 2026-05-01: ~80 of 190 active positions were 5-min crypto
+            # Up/Down trades all entered ~0.50, all resolving ±2% — coin flips
+            # eating capital without delivering signal. Larger crypto markets
+            # (e.g. "Bitcoin Up or Down 6PM ET", entry 0.09 → +1060%) ARE valid
+            # because they're priced asymmetrically when the whale enters.
+            # Heuristic: 0.45-0.55 entry on a "Up or Down" title = noise.
+            t_lower_title = ""
+            try:
+                t_lower_title = (t.get("title") or t.get("slug") or "").lower()
+            except Exception:
+                pass
+            is_short_window_crypto = (
+                "up or down" in t_lower_title
+                and 0.45 <= price <= 0.55
+            )
+            if is_short_window_crypto:
+                copied_hashes.add(tx_hash)
+                continue
+
+            # Tier-based bet sizing — better signal = bigger bet.
+            # Default $10. "alltime_legend" = $15. "both" tier = $20.
+            tier = whale.get("tier", "weekly_hot")
+            if tier == "both_alltime+weekly":
+                this_bet = bet_size * 2.0   # strongest signal: proven AND active
+            elif tier == "alltime_legend":
+                this_bet = bet_size * 1.5
+            else:
+                this_bet = bet_size
+
+            # Filter: skip whales with weak weekly ROI (if data available)
+            roi_week = whale.get("roi_pct_week")
+            if roi_week is not None and roi_week < 3.0:
+                # weekly hot but barely profitable — likely market maker fluke
+                copied_hashes.add(tx_hash)
+                continue
+
             # Find this market in Simmer's catalog
             sim_market_id = simmer_find_by_condition(condition_id, api_key)
             if not sim_market_id:
@@ -293,18 +330,19 @@ def cycle(config: dict, state: dict) -> None:
                 copied_hashes.add(tx_hash)
                 continue
 
-            # Place mirror trade in SIM
+            # Place mirror trade in SIM with tier-based sizing
             reason = (
-                f"Copy from {whale['name']} ({wallet[:8]}): "
+                f"Copy from {whale['name']} ({wallet[:8]}, tier={tier}): "
                 f"BUY {outcome} @ {price:.2f} for ${usdc_size:.0f}. "
-                f"Whale ROI {whale.get('roi_pct_week', 0):.1f}%/week"
+                f"Whale week ROI {whale.get('roi_pct_week', 0):.1f}%, "
+                f"alltime PnL ${whale.get('pnl_alltime', 0):.0f}"
             )
             logger.info(
-                f"COPY: {whale['name']} {outcome} @ {price:.2f} "
-                f"size ${usdc_size:.0f} → SIM bet ${bet_size:.0f}"
+                f"COPY [{tier}]: {whale['name']} {outcome} @ {price:.2f} "
+                f"size ${usdc_size:.0f} → SIM bet ${this_bet:.0f}"
             )
 
-            result = simmer_place_trade(sim_market_id, mirror_side, bet_size, reason, api_key)
+            result = simmer_place_trade(sim_market_id, mirror_side, this_bet, reason, api_key)
             copied_hashes.add(tx_hash)
             copies_this_cycle += 1
 
@@ -314,14 +352,16 @@ def cycle(config: dict, state: dict) -> None:
                 "source": "sports-bot",
                 "whale_wallet": wallet,
                 "whale_name": whale.get("name"),
+                "whale_tier": tier,
                 "whale_roi_pct": whale.get("roi_pct_week"),
+                "whale_pnl_alltime": whale.get("pnl_alltime"),
                 "condition_id": condition_id,
                 "sim_market_id": sim_market_id,
                 "side": mirror_side,
                 "outcome": outcome,
                 "whale_price": price,
                 "whale_size": usdc_size,
-                "bet_amount": bet_size,
+                "bet_amount": this_bet,
                 "tx_hash": tx_hash,
                 "copy_executed": result.get("executed", False),
                 "error": result.get("error", ""),
