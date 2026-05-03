@@ -104,6 +104,26 @@ def load_whales() -> list[dict]:
         return []
 
 
+PERFORMANCE_PATH = os.path.join(ROOT, "memory", "whale_performance.json")
+
+
+def load_whale_performance() -> dict:
+    """Per-whale status from scripts/whale_performance.py.
+
+    Returns dict[wallet_lower] -> { status: blocked|elite|normal|trial, ... }
+    Empty dict if file doesn't exist yet (first hour after install).
+    """
+    if not os.path.exists(PERFORMANCE_PATH):
+        return {}
+    try:
+        with open(PERFORMANCE_PATH) as f:
+            payload = json.load(f)
+        return {k.lower(): v for k, v in payload.get("by_wallet", {}).items()}
+    except Exception as e:
+        logger.warning(f"load_whale_performance failed: {e}")
+        return {}
+
+
 # ---------------------------------------------------------------------------
 # Polymarket: fetch whale recent trades
 # ---------------------------------------------------------------------------
@@ -204,6 +224,9 @@ def cycle(config: dict, state: dict) -> None:
         logger.info("No whales loaded. Skip cycle.")
         return
 
+    # Per-whale performance gates from whale_performance.py (hourly cron)
+    perf = load_whale_performance()
+
     api_key = config["simmer_api_key"]
     bet_size = float(config.get("bet_size", 10.0))
     max_copies_per_cycle = int(config.get("max_copies_per_cycle", 3))
@@ -229,6 +252,13 @@ def cycle(config: dict, state: dict) -> None:
             if time.time() < block_until:
                 continue
             del blocked[wallet]
+
+        # Per-whale performance gate (auto-refreshed hourly by whale_performance.py)
+        whale_perf = perf.get(wallet.lower(), {})
+        whale_status = whale_perf.get("status", "trial")
+        if whale_status == "blocked":
+            # Skip permanently until next hourly recompute lifts the block
+            continue
 
         # Fetch recent activity since last-seen timestamp for this whale
         since_ts = int(last_seen.get(wallet, 0))
@@ -297,6 +327,12 @@ def cycle(config: dict, state: dict) -> None:
             else:
                 this_bet = bet_size
 
+            # Elite multiplier on top of tier — whales that have actually been
+            # making us money (per whale_performance.py daily recompute).
+            # WR > 65% AND PnL > $50 SIM on N>=10 of OUR copies = "elite".
+            if whale_status == "elite":
+                this_bet = this_bet * 2.0
+
             # Filter: skip whales with weak weekly ROI (if data available)
             roi_week = whale.get("roi_pct_week")
             if roi_week is not None and roi_week < 3.0:
@@ -337,8 +373,9 @@ def cycle(config: dict, state: dict) -> None:
                 f"Whale week ROI {whale.get('roi_pct_week', 0):.1f}%, "
                 f"alltime PnL ${whale.get('pnl_alltime', 0):.0f}"
             )
+            elite_tag = " ⭐ELITE" if whale_status == "elite" else ""
             logger.info(
-                f"COPY [{tier}]: {whale['name']} {outcome} @ {price:.2f} "
+                f"COPY [{tier}{elite_tag}]: {whale['name']} {outcome} @ {price:.2f} "
                 f"size ${usdc_size:.0f} → SIM bet ${this_bet:.0f}"
             )
 
@@ -353,6 +390,7 @@ def cycle(config: dict, state: dict) -> None:
                 "whale_wallet": wallet,
                 "whale_name": whale.get("name"),
                 "whale_tier": tier,
+                "whale_status": whale_status,  # trial|normal|elite|blocked
                 "whale_roi_pct": whale.get("roi_pct_week"),
                 "whale_pnl_alltime": whale.get("pnl_alltime"),
                 "condition_id": condition_id,
