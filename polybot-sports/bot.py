@@ -264,7 +264,10 @@ def cycle(config: dict, state: dict) -> None:
         logger.debug(f"exposure check failed: {e}")
 
     last_seen: dict = state.get("last_seen_ts", {})
-    copied_hashes: set[str] = set(state.get("copied_trade_hashes", []))
+    # Use dict (insertion-ordered) instead of set so the [-2000:] trim at save
+    # time keeps the most recent hashes — set order is hash-based and would
+    # silently drop newly added items.
+    copied_hashes: dict[str, None] = dict.fromkeys(state.get("copied_trade_hashes", []))
     blocked: dict = state.get("blocked_whales", {})
 
     copies_this_cycle = 0
@@ -340,7 +343,7 @@ def cycle(config: dict, state: dict) -> None:
                 and 0.45 <= price <= 0.55
             )
             if is_short_window_crypto:
-                copied_hashes.add(tx_hash)
+                copied_hashes[tx_hash] = None
                 continue
 
             # Tier-based bet sizing — better signal = bigger bet.
@@ -363,7 +366,7 @@ def cycle(config: dict, state: dict) -> None:
             roi_week = whale.get("roi_pct_week")
             if roi_week is not None and roi_week < 3.0:
                 # weekly hot but barely profitable — likely market maker fluke
-                copied_hashes.add(tx_hash)
+                copied_hashes[tx_hash] = None
                 continue
 
             # Find this market in Simmer's catalog
@@ -373,7 +376,7 @@ def cycle(config: dict, state: dict) -> None:
                     f"  No Simmer match for cond={condition_id[:10]}... "
                     f"(whale {whale['name']} bet ${usdc_size:.0f})"
                 )
-                copied_hashes.add(tx_hash)  # don't retry
+                copied_hashes[tx_hash] = None  # don't retry
                 continue
 
             # Map outcome → side. Polymarket outcomes are typically "Yes"/"No"
@@ -389,7 +392,7 @@ def cycle(config: dict, state: dict) -> None:
                     f"  Skip multi-outcome market: {whale['name']} bought "
                     f"'{outcome}' (cond {condition_id[:10]})"
                 )
-                copied_hashes.add(tx_hash)
+                copied_hashes[tx_hash] = None
                 continue
 
             # Place mirror trade in SIM with tier-based sizing
@@ -406,7 +409,7 @@ def cycle(config: dict, state: dict) -> None:
             )
 
             result = simmer_place_trade(sim_market_id, mirror_side, this_bet, reason, api_key)
-            copied_hashes.add(tx_hash)
+            copied_hashes[tx_hash] = None
             copies_this_cycle += 1
 
             log_calibration({
