@@ -231,11 +231,37 @@ def cycle(config: dict, state: dict) -> None:
     bet_size = float(config.get("bet_size", 10.0))
     max_copies_per_cycle = int(config.get("max_copies_per_cycle", 3))
     min_balance = bet_size * 1.5
+    # Safety cap: don't open new positions if open exposure > X% of total value.
+    # Default 75%: leaves 25% of total SIM value as cash buffer.
+    max_exposure_pct = float(config.get("max_exposure_pct", 0.75))
 
     bal = simmer_balance(api_key)
     if bal < min_balance:
         logger.warning(f"Balance {bal:.0f} SIM < {min_balance:.0f}. Skipping cycle.")
         return
+
+    # Exposure check via portfolio endpoint
+    try:
+        r = SESSION.get(
+            f"{SIMMER_API}/portfolio",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            d = r.json()
+            sim = d.get("sim", {})
+            total_value = float(sim.get("balance") or 0)
+            exposure = float(sim.get("total_exposure") or 0)
+            if total_value > 0:
+                exp_ratio = exposure / total_value
+                if exp_ratio > max_exposure_pct:
+                    logger.warning(
+                        f"Exposure {exp_ratio*100:.0f}% > {max_exposure_pct*100:.0f}% "
+                        f"(${exposure:.0f}/${total_value:.0f}). Skipping new trades."
+                    )
+                    return
+    except Exception as e:
+        logger.debug(f"exposure check failed: {e}")
 
     last_seen: dict = state.get("last_seen_ts", {})
     copied_hashes: set[str] = set(state.get("copied_trade_hashes", []))
