@@ -33,10 +33,119 @@ SIMMER_API = "https://api.simmer.markets/api/sdk"
 # Significance + classification
 MIN_N_FOR_CLASSIFICATION = 10   # need at least 10 copies before judging
 WINDOW_LAST_N = 50              # only consider most recent 50 copies per whale
-BLOCK_WR_THRESHOLD = 0.30       # WR below this AND negative P&L → block
+# Tightened 2026-05-04: previous (0.30 / -50) was too lenient — RN1 type whales
+# (WR 42% / PnL ~$0) kept doing 100+ copies/day with no edge. New limits flag
+# whales that aren't clearly profitable as "blocked" so we stop wasting bets.
+BLOCK_WR_THRESHOLD = 0.45       # WR below this AND negative P&L → block
 ELITE_WR_THRESHOLD = 0.65       # WR above this AND positive P&L → elite
 ELITE_PNL_MIN = 50.0            # at least $50 SIM net to qualify
-BLOCK_PNL_MAX = -50.0           # at least -$50 net to qualify for blocking
+BLOCK_PNL_MAX = -25.0           # at least -$25 net to qualify for blocking
+
+# Pre-trial virtual backtest config — applied to whales with no real copies yet.
+# Saves us from sending money to whales that would have lost in backtest.
+POLYMARKET_DATA = "https://data-api.polymarket.com"
+BACKTEST_LIMIT = 30             # last N Polymarket trades to simulate
+BACKTEST_MIN_N_RESOLVED = 10    # need 10 resolved virtual trades to judge
+BACKTEST_BLOCK_WR = 0.45        # virtual WR below this → block before any real bet
+BACKTEST_BLOCK_PNL = -25.0      # AND virtual PnL below this
+
+
+def simmer_find_by_condition(condition_id: str, api_key: str) -> str | None:
+    """Find Simmer market_id for a Polymarket conditionId, or None."""
+    try:
+        r = requests.get(
+            f"{SIMMER_API}/markets",
+            params={"condition_id": condition_id, "limit": 1},
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=8,
+        )
+        if r.status_code != 200:
+            return None
+        body = r.json()
+        markets = body.get("markets", body) if isinstance(body, dict) else body
+        if not markets:
+            return None
+        m = markets[0] if isinstance(markets, list) else markets
+        return m.get("id") or m.get("market_id")
+    except Exception:
+        return None
+
+
+def fetch_polymarket_activity(wallet: str, limit: int = 30) -> list[dict]:
+    """Fetch a whale's recent Polymarket trades."""
+    try:
+        r = requests.get(
+            f"{POLYMARKET_DATA}/activity",
+            params={"user": wallet, "type": "TRADE",
+                    "sortBy": "TIMESTAMP", "sortDirection": "DESC", "limit": limit},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def virtual_backtest(wallet: str, api_key: str) -> tuple[float, float, int]:
+    """Simulate copying this whale's last N trades using the same filters as
+    the real bot. Returns (wr, pnl_sim, n_resolved).
+
+    Uses $10 virtual bet sizing, ignores fill-splitting (one copy per
+    conditionId per direction). This mirrors the bot's per-condition cap.
+    """
+    trades = fetch_polymarket_activity(wallet, limit=BACKTEST_LIMIT)
+    if not trades:
+        return 0.0, 0.0, 0
+
+    seen_conds: set[str] = set()  # one virtual copy per (cond, side)
+    wins, losses = 0, 0
+    pnl = 0.0
+    n_resolved = 0
+    for t in trades:
+        side = (t.get("side") or "").upper()
+        if side != "BUY":
+            continue
+        cond = t.get("conditionId") or ""
+        outcome = (t.get("outcome") or "").lower()
+        if not cond or outcome not in ("yes", "no", "y", "n", "true", "false", "1", "0"):
+            continue
+        usdc_size = float(t.get("usdcSize") or 0)
+        if usdc_size < 50:
+            continue
+        price = float(t.get("price") or 0)
+        if price < 0.05 or price > 0.95:
+            continue
+        # Apply crypto Up/Down noise filter (same as bot)
+        title = (t.get("title") or t.get("slug") or "").lower()
+        if "up or down" in title and 0.20 <= price <= 0.80:
+            continue
+        # One virtual copy per (cond, side)
+        key = f"{cond}:{outcome}"
+        if key in seen_conds:
+            continue
+        seen_conds.add(key)
+        # Resolve via Simmer
+        sim_id = simmer_find_by_condition(cond, api_key)
+        if not sim_id:
+            continue
+        outcome_yes = fetch_market_outcome(sim_id, api_key)
+        if outcome_yes is None:
+            continue
+        n_resolved += 1
+        mirror_yes = outcome in ("yes", "y", "true", "1")
+        won = (outcome_yes and mirror_yes) or (not outcome_yes and not mirror_yes)
+        bet = 10.0
+        if won:
+            wins += 1
+            pnl += (1 - price) * bet / price
+        else:
+            losses += 1
+            pnl -= bet
+
+    wr = wins / n_resolved if n_resolved > 0 else 0.0
+    return wr, pnl, n_resolved
 
 
 def fetch_market_outcome(market_id: str, api_key: str) -> bool | None:
@@ -87,8 +196,31 @@ def main() -> None:
             except Exception:
                 continue
 
+    # Also include whales from scout files even if no copies yet — these get
+    # the virtual backtest treatment so we never blindly send money to a new
+    # whale without first checking how their last 30 trades would have done.
+    name_by_wallet: dict[str, str] = {}
+    tier_by_wallet: dict[str, str] = {}
+    memory_dir = os.path.join(ROOT, "memory")
+    if os.path.isdir(memory_dir):
+        for fn in os.listdir(memory_dir):
+            if not fn.startswith("whales_") or not fn.endswith(".json"):
+                continue
+            try:
+                d = json.load(open(os.path.join(memory_dir, fn)))
+                for w in d.get("whales", []):
+                    wal = (w.get("wallet") or "").lower()
+                    if not wal:
+                        continue
+                    name_by_wallet.setdefault(wal, w.get("name") or "?")
+                    tier_by_wallet.setdefault(wal, w.get("tier") or "?")
+                    if wal not in by_whale:
+                        by_whale[wal] = []  # placeholder so loop visits it
+            except Exception:
+                continue
+
     print(f"=== Whale performance @ {datetime.now(timezone.utc).isoformat()} ===")
-    print(f"Tracked whales: {len(by_whale)}")
+    print(f"Tracked whales: {len(by_whale)} (incl. scout-only candidates)")
 
     # Resolve recent N copies per whale and compute stats
     resolution_cache: dict[str, bool | None] = {}
@@ -103,8 +235,8 @@ def main() -> None:
         losses = 0
         pnl = 0.0
         resolved_n = 0
-        whale_name = recent[-1].get("whale_name", "?") if recent else "?"
-        whale_tier = recent[-1].get("whale_tier", "?") if recent else "?"
+        whale_name = (recent[-1].get("whale_name") if recent else None) or name_by_wallet.get(wallet, "?")
+        whale_tier = (recent[-1].get("whale_tier") if recent else None) or tier_by_wallet.get(wallet, "?")
 
         for t in recent:
             mid = t.get("sim_market_id") or t.get("market_id")
@@ -131,15 +263,30 @@ def main() -> None:
 
         wr = wins / resolved_n if resolved_n > 0 else 0.0
 
-        # Classify
+        # Virtual backtest only when we don't yet have enough real-copy data
+        v_wr, v_pnl, v_n = (0.0, 0.0, 0)
         if resolved_n < MIN_N_FOR_CLASSIFICATION:
-            status = "trial"
-        elif wr < BLOCK_WR_THRESHOLD and pnl < BLOCK_PNL_MAX:
-            status = "blocked"
-        elif wr > ELITE_WR_THRESHOLD and pnl > ELITE_PNL_MIN:
-            status = "elite"
+            v_wr, v_pnl, v_n = virtual_backtest(wallet, api_key)
+
+        # Classify
+        if resolved_n >= MIN_N_FOR_CLASSIFICATION:
+            if wr < BLOCK_WR_THRESHOLD and pnl < BLOCK_PNL_MAX:
+                status = "blocked"
+            elif wr > ELITE_WR_THRESHOLD and pnl > ELITE_PNL_MIN:
+                status = "elite"
+            else:
+                status = "normal"
+        elif v_n >= BACKTEST_MIN_N_RESOLVED:
+            # Use backtest data as a proxy classification — never let a whale
+            # with bad historical performance touch real money.
+            if v_wr < BACKTEST_BLOCK_WR and v_pnl < BACKTEST_BLOCK_PNL:
+                status = "blocked"
+            elif v_wr > ELITE_WR_THRESHOLD and v_pnl > ELITE_PNL_MIN:
+                status = "elite"
+            else:
+                status = "trial"
         else:
-            status = "normal"
+            status = "trial"
 
         perf[wallet] = {
             "wallet": wallet,
@@ -151,6 +298,9 @@ def main() -> None:
             "losses": losses,
             "wr": round(wr, 3),
             "pnl_sim": round(pnl, 2),
+            "backtest_wr": round(v_wr, 3),
+            "backtest_pnl_sim": round(v_pnl, 2),
+            "backtest_n": v_n,
             "status": status,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -162,7 +312,12 @@ def main() -> None:
             "min_n": MIN_N_FOR_CLASSIFICATION,
             "window_last_n": WINDOW_LAST_N,
             "block_wr_threshold": BLOCK_WR_THRESHOLD,
+            "block_pnl_max": BLOCK_PNL_MAX,
             "elite_wr_threshold": ELITE_WR_THRESHOLD,
+            "elite_pnl_min": ELITE_PNL_MIN,
+            "backtest_block_wr": BACKTEST_BLOCK_WR,
+            "backtest_block_pnl": BACKTEST_BLOCK_PNL,
+            "backtest_min_n_resolved": BACKTEST_MIN_N_RESOLVED,
         },
         "by_wallet": perf,
     }
