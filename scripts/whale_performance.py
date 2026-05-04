@@ -88,12 +88,21 @@ def fetch_polymarket_activity(wallet: str, limit: int = 30) -> list[dict]:
         return []
 
 
-def virtual_backtest(wallet: str, api_key: str) -> tuple[float, float, int]:
+def virtual_backtest(
+    wallet: str,
+    api_key: str,
+    cond_to_sim: dict[str, str | None],
+    outcome_cache: dict[str, bool | None],
+) -> tuple[float, float, int]:
     """Simulate copying this whale's last N trades using the same filters as
     the real bot. Returns (wr, pnl_sim, n_resolved).
 
     Uses $10 virtual bet sizing, ignores fill-splitting (one copy per
     conditionId per direction). This mirrors the bot's per-condition cap.
+
+    cond_to_sim and outcome_cache are passed in so lookups are cached across
+    all whales in the same run (Polymarket conditions and Simmer markets are
+    shared between whales).
     """
     trades = fetch_polymarket_activity(wallet, limit=BACKTEST_LIMIT)
     if not trades:
@@ -126,11 +135,15 @@ def virtual_backtest(wallet: str, api_key: str) -> tuple[float, float, int]:
         if key in seen_conds:
             continue
         seen_conds.add(key)
-        # Resolve via Simmer
-        sim_id = simmer_find_by_condition(cond, api_key)
+        # Resolve via Simmer (cached across whales)
+        if cond not in cond_to_sim:
+            cond_to_sim[cond] = simmer_find_by_condition(cond, api_key)
+        sim_id = cond_to_sim[cond]
         if not sim_id:
             continue
-        outcome_yes = fetch_market_outcome(sim_id, api_key)
+        if sim_id not in outcome_cache:
+            outcome_cache[sim_id] = fetch_market_outcome(sim_id, api_key)
+        outcome_yes = outcome_cache[sim_id]
         if outcome_yes is None:
             continue
         n_resolved += 1
@@ -222,8 +235,12 @@ def main() -> None:
     print(f"=== Whale performance @ {datetime.now(timezone.utc).isoformat()} ===")
     print(f"Tracked whales: {len(by_whale)} (incl. scout-only candidates)")
 
-    # Resolve recent N copies per whale and compute stats
+    # Caches shared across all whales for the run (sim_market_id and outcome
+    # lookups are deterministic by condition / market, so they're worth
+    # reusing — saves O(thousands) of HTTP calls when many whales touched the
+    # same markets).
     resolution_cache: dict[str, bool | None] = {}
+    cond_to_sim: dict[str, str | None] = {}
     perf: dict[str, dict] = {}
 
     for wallet, trades in by_whale.items():
@@ -263,10 +280,16 @@ def main() -> None:
 
         wr = wins / resolved_n if resolved_n > 0 else 0.0
 
-        # Virtual backtest only when we don't yet have enough real-copy data
+        # Virtual backtest only for genuinely unknown whales — those with no
+        # real resolved copies. Whales with 1-9 resolved real copies stay in
+        # 'trial' on real data alone (we already know they trade, just not
+        # enough to judge). This keeps the run bounded — backtest is the
+        # expensive part (Polymarket activity + Simmer resolution per trade).
         v_wr, v_pnl, v_n = (0.0, 0.0, 0)
-        if resolved_n < MIN_N_FOR_CLASSIFICATION:
-            v_wr, v_pnl, v_n = virtual_backtest(wallet, api_key)
+        if resolved_n == 0:
+            v_wr, v_pnl, v_n = virtual_backtest(
+                wallet, api_key, cond_to_sim, resolution_cache,
+            )
 
         # Classify
         if resolved_n >= MIN_N_FOR_CLASSIFICATION:
