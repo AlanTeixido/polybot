@@ -68,7 +68,8 @@ def load_state() -> dict:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {"copied_trade_hashes": [], "last_seen_ts": {}, "total_copies": 0,
-                "blocked_whales": {}, "consecutive_losses": {}}
+                "blocked_whales": {}, "consecutive_losses": {},
+                "cond_copies": {}}
 
 
 def save_state(state: dict) -> None:
@@ -151,12 +152,10 @@ def fetch_whale_activity(wallet: str, since_ts: int = 0, limit: int = 20) -> lis
 # ---------------------------------------------------------------------------
 # Simmer: find market by Polymarket condition_id, place SIM trade
 # ---------------------------------------------------------------------------
-def simmer_find_by_condition(condition_id: str, api_key: str) -> str | None:
+def simmer_find_by_condition(condition_id: str, api_key: str) -> tuple[str | None, str]:
     """Search Simmer's catalog for a market matching this Polymarket condition_id.
 
-    Simmer imports many Polymarket markets; ours might be already there. If
-    not found, we skip (don't try to import — keeps things simple for SIM
-    validation).
+    Returns (market_id, title). title used downstream for noise filtering.
     """
     try:
         r = SESSION.get(
@@ -166,16 +165,18 @@ def simmer_find_by_condition(condition_id: str, api_key: str) -> str | None:
             timeout=10,
         )
         if r.status_code != 200:
-            return None
+            return None, ""
         body = r.json()
         markets = body.get("markets", body) if isinstance(body, dict) else body
         if not markets:
-            return None
+            return None, ""
         m = markets[0] if isinstance(markets, list) else markets
-        return m.get("id") or m.get("market_id")
+        mid = m.get("id") or m.get("market_id")
+        title = m.get("title") or m.get("question") or m.get("name") or m.get("slug") or ""
+        return mid, title
     except Exception as e:
         logger.debug(f"simmer_find_by_condition err: {e}")
-        return None
+        return None, ""
 
 
 def simmer_place_trade(
@@ -270,6 +271,23 @@ def cycle(config: dict, state: dict) -> None:
     copied_hashes: dict[str, None] = dict.fromkeys(state.get("copied_trade_hashes", []))
     blocked: dict = state.get("blocked_whales", {})
 
+    # Per-condition cooldown: prevent piling into the same market when the
+    # same whale's order gets split into many fills, or when multiple whales
+    # all crowd the same market. Tracks {condition_id: [ts, ts, ...]} (ts in
+    # last 24h). New copies on a condition with >= max_copies_per_condition_24h
+    # entries in the window are skipped. Default 2 = at most one extra copy
+    # after the first, which already gives the same exposure as a doubled bet
+    # without runaway scaling.
+    cond_copies: dict[str, list[int]] = state.get("cond_copies", {})
+    max_copies_per_cond = int(config.get("max_copies_per_condition_24h", 2))
+    cond_window_sec = 24 * 3600
+    now_ts = int(time.time())
+    # Trim stale entries
+    for cid in list(cond_copies.keys()):
+        cond_copies[cid] = [t for t in cond_copies[cid] if now_ts - t < cond_window_sec]
+        if not cond_copies[cid]:
+            del cond_copies[cid]
+
     copies_this_cycle = 0
 
     for whale in whales[:15]:  # cap to top 15 to control rate
@@ -326,23 +344,20 @@ def cycle(config: dict, state: dict) -> None:
             if price < 0.05 or price > 0.95:
                 continue
 
-            # Filter: skip 5-min crypto Up/Down "noise" markets entered near 0.50.
-            # Data from 2026-05-01: ~80 of 190 active positions were 5-min crypto
-            # Up/Down trades all entered ~0.50, all resolving ±2% — coin flips
-            # eating capital without delivering signal. Larger crypto markets
-            # (e.g. "Bitcoin Up or Down 6PM ET", entry 0.09 → +1060%) ARE valid
-            # because they're priced asymmetrically when the whale enters.
-            # Heuristic: 0.45-0.55 entry on a "Up or Down" title = noise.
-            t_lower_title = ""
+            # Pre-Simmer noise filter from Polymarket title (cheap, no extra API call).
+            # Real check happens after Simmer lookup with the canonical title.
+            poly_title = ""
             try:
-                t_lower_title = (t.get("title") or t.get("slug") or "").lower()
+                poly_title = (t.get("title") or t.get("slug") or "").lower()
             except Exception:
                 pass
-            is_short_window_crypto = (
-                "up or down" in t_lower_title
-                and 0.45 <= price <= 0.55
-            )
-            if is_short_window_crypto:
+            if "up or down" in poly_title and 0.20 <= price <= 0.80:
+                # Short-window crypto noise. The original 0.45-0.55 cap was too
+                # narrow — audit on 2026-05-04 showed 162 such copies today at
+                # prices 0.40-0.90 ($4,280) all bleeding small. Whales' "edge"
+                # on 5-15 min crypto direction is just minute-level noise.
+                # Genuine asymmetric entries (<0.20 or >0.80) might be real
+                # signal so we keep that escape hatch.
                 copied_hashes[tx_hash] = None
                 continue
 
@@ -369,14 +384,33 @@ def cycle(config: dict, state: dict) -> None:
                 copied_hashes[tx_hash] = None
                 continue
 
+            # Per-condition cooldown: skip if we already copied this market enough.
+            # Catches fill-splitting (one whale order = many fills) AND multiple
+            # whales piling into the same market.
+            already_on_cond = len(cond_copies.get(condition_id, []))
+            if already_on_cond >= max_copies_per_cond:
+                logger.debug(
+                    f"  Skip cond={condition_id[:10]}: already {already_on_cond} "
+                    f"copies in last 24h (max {max_copies_per_cond})"
+                )
+                copied_hashes[tx_hash] = None  # don't retry this fill
+                continue
+
             # Find this market in Simmer's catalog
-            sim_market_id = simmer_find_by_condition(condition_id, api_key)
+            sim_market_id, sim_title = simmer_find_by_condition(condition_id, api_key)
             if not sim_market_id:
                 logger.info(
                     f"  No Simmer match for cond={condition_id[:10]}... "
                     f"(whale {whale['name']} bet ${usdc_size:.0f})"
                 )
                 copied_hashes[tx_hash] = None  # don't retry
+                continue
+
+            # Authoritative noise filter using Simmer's canonical title.
+            # Catches the cases where Polymarket activity title is missing.
+            sim_title_l = (sim_title or "").lower()
+            if "up or down" in sim_title_l and 0.20 <= price <= 0.80:
+                copied_hashes[tx_hash] = None
                 continue
 
             # Map outcome → side. Polymarket outcomes are typically "Yes"/"No"
@@ -410,6 +444,7 @@ def cycle(config: dict, state: dict) -> None:
 
             result = simmer_place_trade(sim_market_id, mirror_side, this_bet, reason, api_key)
             copied_hashes[tx_hash] = None
+            cond_copies.setdefault(condition_id, []).append(now_ts)
             copies_this_cycle += 1
 
             log_calibration({
@@ -447,6 +482,7 @@ def cycle(config: dict, state: dict) -> None:
     state["last_seen_ts"] = last_seen
     state["copied_trade_hashes"] = list(copied_hashes)[-2000:]  # keep recent only
     state["blocked_whales"] = blocked
+    state["cond_copies"] = cond_copies
     state["total_copies"] = state.get("total_copies", 0) + copies_this_cycle
     save_state(state)
 
