@@ -44,7 +44,8 @@ BLOCK_PNL_MAX = -25.0           # at least -$25 net to qualify for blocking
 # Pre-trial virtual backtest config — applied to whales with no real copies yet.
 # Saves us from sending money to whales that would have lost in backtest.
 POLYMARKET_DATA = "https://data-api.polymarket.com"
-BACKTEST_LIMIT = 30             # last N Polymarket trades to simulate
+BACKTEST_LIMIT = 200            # fetch last N Polymarket trades (more depth)
+BACKTEST_MIN_AGE_DAYS = 5       # only consider trades this old (let them resolve)
 BACKTEST_MIN_N_RESOLVED = 10    # need 10 resolved virtual trades to judge
 BACKTEST_BLOCK_WR = 0.45        # virtual WR below this → block before any real bet
 BACKTEST_BLOCK_PNL = -25.0      # AND virtual PnL below this
@@ -105,6 +106,13 @@ def virtual_backtest(
     shared between whales).
     """
     trades = fetch_polymarket_activity(wallet, limit=BACKTEST_LIMIT)
+    if not trades:
+        return 0.0, 0.0, 0
+
+    # Only consider trades old enough to have resolved.
+    import time as _t
+    cutoff_ts = _t.time() - BACKTEST_MIN_AGE_DAYS * 86400
+    trades = [t for t in trades if (t.get("timestamp") or 0) <= cutoff_ts]
     if not trades:
         return 0.0, 0.0, 0
 
