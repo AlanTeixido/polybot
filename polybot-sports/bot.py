@@ -233,8 +233,8 @@ def cycle(config: dict, state: dict) -> None:
     max_copies_per_cycle = int(config.get("max_copies_per_cycle", 3))
     min_balance = bet_size * 1.5
     # Safety cap: don't open new positions if open exposure > X% of total value.
-    # Default 75%: leaves 25% of total SIM value as cash buffer.
-    max_exposure_pct = float(config.get("max_exposure_pct", 0.75))
+    # Loosened 2026-05-05 (SIM experiment): 0.75 → 0.95 to maximise activity.
+    max_exposure_pct = float(config.get("max_exposure_pct", 0.95))
 
     bal = simmer_balance(api_key)
     if bal < min_balance:
@@ -274,12 +274,10 @@ def cycle(config: dict, state: dict) -> None:
     # Per-condition cooldown: prevent piling into the same market when the
     # same whale's order gets split into many fills, or when multiple whales
     # all crowd the same market. Tracks {condition_id: [ts, ts, ...]} (ts in
-    # last 24h). New copies on a condition with >= max_copies_per_condition_24h
-    # entries in the window are skipped. Default 2 = at most one extra copy
-    # after the first, which already gives the same exposure as a doubled bet
-    # without runaway scaling.
+    # last 24h).
+    # Loosened 2026-05-05 (SIM experiment): 2 → 50 to maximise activity.
     cond_copies: dict[str, list[int]] = state.get("cond_copies", {})
-    max_copies_per_cond = int(config.get("max_copies_per_condition_24h", 2))
+    max_copies_per_cond = int(config.get("max_copies_per_condition_24h", 50))
     cond_window_sec = 24 * 3600
     now_ts = int(time.time())
     # Trim stale entries
@@ -351,13 +349,10 @@ def cycle(config: dict, state: dict) -> None:
                 poly_title = (t.get("title") or t.get("slug") or "").lower()
             except Exception:
                 pass
-            if "up or down" in poly_title and 0.20 <= price <= 0.80:
-                # Short-window crypto noise. The original 0.45-0.55 cap was too
-                # narrow — audit on 2026-05-04 showed 162 such copies today at
-                # prices 0.40-0.90 ($4,280) all bleeding small. Whales' "edge"
-                # on 5-15 min crypto direction is just minute-level noise.
-                # Genuine asymmetric entries (<0.20 or >0.80) might be real
-                # signal so we keep that escape hatch.
+            # Loosened 2026-05-05 (SIM experiment): 0.20-0.80 → 0.45-0.55 only.
+            # Letting most "Up or Down" through to test if real edge appears at
+            # asymmetric prices (whale conviction at 0.30 or 0.70).
+            if "up or down" in poly_title and 0.45 <= price <= 0.55:
                 copied_hashes[tx_hash] = None
                 continue
 
@@ -407,9 +402,9 @@ def cycle(config: dict, state: dict) -> None:
                 continue
 
             # Authoritative noise filter using Simmer's canonical title.
-            # Catches the cases where Polymarket activity title is missing.
+            # Loosened 2026-05-05 (SIM experiment): only catch true 0.45-0.55 coin flips.
             sim_title_l = (sim_title or "").lower()
-            if "up or down" in sim_title_l and 0.20 <= price <= 0.80:
+            if "up or down" in sim_title_l and 0.45 <= price <= 0.55:
                 copied_hashes[tx_hash] = None
                 continue
 

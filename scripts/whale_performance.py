@@ -33,13 +33,13 @@ SIMMER_API = "https://api.simmer.markets/api/sdk"
 # Significance + classification
 MIN_N_FOR_CLASSIFICATION = 10   # need at least 10 copies before judging
 WINDOW_LAST_N = 50              # only consider most recent 50 copies per whale
-# Tightened 2026-05-04: previous (0.30 / -50) was too lenient — RN1 type whales
-# (WR 42% / PnL ~$0) kept doing 100+ copies/day with no edge. New limits flag
-# whales that aren't clearly profitable as "blocked" so we stop wasting bets.
-BLOCK_WR_THRESHOLD = 0.45       # WR below this AND negative P&L → block
+# Loosened 2026-05-05 (SIM experiment): reverted to lenient (0.30 / -50) so
+# more whales stay 'normal' and the bot trades more. We want to test what
+# happens with high activity in SIM before deciding on final thresholds.
+BLOCK_WR_THRESHOLD = 0.30       # WR below this AND negative P&L → block
 ELITE_WR_THRESHOLD = 0.65       # WR above this AND positive P&L → elite
 ELITE_PNL_MIN = 50.0            # at least $50 SIM net to qualify
-BLOCK_PNL_MAX = -25.0           # at least -$25 net to qualify for blocking
+BLOCK_PNL_MAX = -50.0           # at least -$50 net to qualify for blocking
 
 # Note: pre-trial virtual backtest was attempted on 2026-05-04 and removed.
 # Idea: simulate copying a scout-only whale's last 30-200 trades and resolve
