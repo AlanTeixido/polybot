@@ -230,7 +230,11 @@ def cycle(config: dict, state: dict) -> None:
 
     api_key = config["simmer_api_key"]
     bet_size = float(config.get("bet_size", 10.0))
-    max_copies_per_cycle = int(config.get("max_copies_per_cycle", 3))
+    # Bumped 2026-05-10: 3 → 5 to give trial whales more chances to reach
+    # MIN_N_FOR_CLASSIFICATION (=10 resolved) faster. With 7 copies/h prior,
+    # discovering a new good whale took weeks. Higher cap accelerates the
+    # trial → normal/elite/blocked transition.
+    max_copies_per_cycle = int(config.get("max_copies_per_cycle", 5))
     min_balance = bet_size * 1.5
     # Safety cap: don't open new positions if open exposure > X% of total value.
     # Default 75%: leaves 25% of total SIM value as cash buffer.

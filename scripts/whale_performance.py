@@ -32,7 +32,12 @@ SIMMER_API = "https://api.simmer.markets/api/sdk"
 
 # Significance + classification
 MIN_N_FOR_CLASSIFICATION = 10   # need at least 10 copies before judging
-WINDOW_LAST_N = 50              # only consider most recent 50 copies per whale
+# Time-based window instead of count-based (2026-05-10): heavy-copying whales
+# were "hiding" from blocks because the 50-most-recent included many unresolved
+# trades, dropping resolved_n below the threshold and reverting status to trial.
+# A 14-day window evaluates them on actual recent performance regardless of
+# copy volume.
+WINDOW_DAYS = 14                # consider copies from last N days
 # Tightened 2026-05-04: previous (0.30 / -50) was too lenient — RN1 type whales
 # (WR 42% / PnL ~$0) kept doing 100+ copies/day with no edge. New limits flag
 # whales that aren't clearly profitable as "blocked" so we stop wasting bets.
@@ -128,11 +133,14 @@ def main() -> None:
 
     resolution_cache: dict[str, bool | None] = {}
     perf: dict[str, dict] = {}
+    cutoff_ts = time.time() - WINDOW_DAYS * 86400
 
     for wallet, trades in by_whale.items():
-        # Sort by ts and take most recent N
+        # Sort by ts then keep only trades within the time window. Time-based
+        # (not count-based) so heavy-copying whales can't "hide" by burying
+        # their resolved bad trades under unresolved fresh ones.
         trades.sort(key=lambda t: t.get("timestamp", 0))
-        recent = trades[-WINDOW_LAST_N:]
+        recent = [t for t in trades if t.get("timestamp", 0) >= cutoff_ts]
 
         wins = 0
         losses = 0
@@ -195,7 +203,7 @@ def main() -> None:
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "params": {
             "min_n": MIN_N_FOR_CLASSIFICATION,
-            "window_last_n": WINDOW_LAST_N,
+            "window_days": WINDOW_DAYS,
             "block_wr_threshold": BLOCK_WR_THRESHOLD,
             "block_pnl_max": BLOCK_PNL_MAX,
             "elite_wr_threshold": ELITE_WR_THRESHOLD,
