@@ -46,6 +46,14 @@ ELITE_WR_THRESHOLD = 0.65       # WR above this AND positive P&L → elite
 ELITE_PNL_MIN = 50.0            # at least $50 SIM net to qualify
 BLOCK_PNL_MAX = -25.0           # at least -$25 net to qualify for blocking
 
+# Additional block rule for high-volume grinding losers (2026-05-15).
+# Some whales have WR 50-60% but still lose money per-trade because they bet
+# at high prices where small wins don't compensate large losses. The
+# WR-based rule above misses them. This catches whales who have demonstrably
+# unprofitable per-trade economics over a meaningful sample.
+HIGH_N_THRESHOLD = 100          # need at least 100 resolved copies for this rule
+AVG_PNL_BLOCK = -0.50           # avg PnL/trade below this → block
+
 # Note: pre-trial virtual backtest was attempted on 2026-05-04 and removed.
 # Idea: simulate copying a scout-only whale's last 30-200 trades and resolve
 # outcomes to decide if they're worth ever copying. Implementation worked
@@ -174,10 +182,13 @@ def main() -> None:
 
         wr = wins / resolved_n if resolved_n > 0 else 0.0
 
+        avg_pnl = pnl / resolved_n if resolved_n > 0 else 0.0
+
         # Classify
         if resolved_n < MIN_N_FOR_CLASSIFICATION:
             status = "trial"
-        elif wr < BLOCK_WR_THRESHOLD and pnl < BLOCK_PNL_MAX:
+        elif (wr < BLOCK_WR_THRESHOLD and pnl < BLOCK_PNL_MAX) or \
+             (resolved_n >= HIGH_N_THRESHOLD and avg_pnl <= AVG_PNL_BLOCK):
             status = "blocked"
         elif wr > ELITE_WR_THRESHOLD and pnl > ELITE_PNL_MIN:
             status = "elite"
@@ -194,6 +205,7 @@ def main() -> None:
             "losses": losses,
             "wr": round(wr, 3),
             "pnl_sim": round(pnl, 2),
+            "avg_pnl_per_trade": round(avg_pnl, 3),
             "status": status,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
